@@ -15,7 +15,7 @@ import time
 from timeit import default_timer as timer
 
 
-jax.config.update("jax_enable_x64", True)
+jax.config.update("jax_enable_x64", False)
 
 # # set paths
 # os.environ["ACTIVE_COILS_PATH"] = f"../machine_configs/MAST-U/MAST-U_like_active_coils.pickle"
@@ -44,31 +44,31 @@ eq = equilibrium_update.Equilibrium(    tokamak=tokamak,
 from freegsnke.jtor_update import ConstrainPaxisIp
 
 # Diverted plasma
-profiles = ConstrainPaxisIp(
-    eq=eq,
-    paxis=8e3,
-    Ip=6e5,
-    fvac=0.5,
-    alpha_m=1.8,
-    alpha_n=1.2
-)
-# Limited plasma 
 # profiles = ConstrainPaxisIp(
 #     eq=eq,
-#     paxis=6e3,
-#     Ip=4e5,
+#     paxis=8e3,
+#     Ip=6e5,
 #     fvac=0.5,
 #     alpha_m=1.8,
 #     alpha_n=1.2
 # )
+# Limited plasma 
+profiles = ConstrainPaxisIp(
+    eq=eq,
+    paxis=6e3,
+    Ip=4e5,
+    fvac=0.5,
+    alpha_m=1.8,
+    alpha_n=1.2
+)
 
 from freegsnke import GSstaticsolver
 GSStaticSolver = GSstaticsolver.NKGSsolver(eq)
 
 # load the coil currents
 import pickle
-with open('simple_diverted_currents_PaxisIp.pk', 'rb') as f:
-# with open('simple_limited_currents_PaxisIp.pk', 'rb') as f:
+# with open('simple_diverted_currents_PaxisIp.pk', 'rb') as f:
+with open('simple_limited_currents_PaxisIp.pk', 'rb') as f:
 
     currents_dict = pickle.load(f)
     
@@ -98,21 +98,21 @@ jLimiter = j_limiter_func.Limiter_handler(eq, eq.tokamak.limiter)
 
 from freegsnke.j_jtor import JConstrainPaxisIp, JLao85
 
-jProfile = JConstrainPaxisIp(
-    paxis=8e3,
-    Ip=6e5,
-    fvac=0.5,
-    alpha_m=1.8,
-    alpha_n=1.2
-)
-
 # jProfile = JConstrainPaxisIp(
-#     paxis=6e3,
-#     Ip=4e5,
+#     paxis=8e3,
+#     Ip=6e5,
 #     fvac=0.5,
 #     alpha_m=1.8,
 #     alpha_n=1.2
 # )
+
+jProfile = JConstrainPaxisIp(
+    paxis=6e3,
+    Ip=4e5,
+    fvac=0.5,
+    alpha_m=1.8,
+    alpha_n=1.2
+)
 
 # alpha, beta = profiles.Lao_parameters(4,4)
 # jProfile = JLao85(Ip=6e5,fvac=0.5,alpha=alpha,beta=beta)
@@ -140,13 +140,26 @@ psi_j=jGS.solve(
     eq.psi(),
     jProfilePars,
     jcurr,
-    target_relative_tolerance=1e-7,
-    use_newton=False,
+    target_relative_tolerance=1e-4,
+    use_newton=True,
     verbose=True)
 print("time Jax GS solve=",timer()-t1)
 
 # check psi field
 print("Difference between Jax and default solver:",jnp.linalg.norm(psi_j-eq.psi()))
+
+fig1, ax1 = plt.subplots(1, 1, figsize=(5, 8), dpi=80)
+#ax1.grid(True, which='both')
+#plt.contourf(eq.R, eq.Z, np.abs(eq.psi()-psi_j),50)
+plt.contour(eq.R,eq.Z,eq.psi(),20,colors='black')
+plt.contourf(eq.R, eq.Z, np.abs((eq.psi()-psi_j)),50,cmap='hot_r')
+eq.tokamak.plot(axis=ax1, show=False)
+plt.plot(eq.tokamak.wall.R, eq.tokamak.wall.Z, 'k', 3.0)
+ax1.set_xlim(0.1, 2.15)
+ax1.set_ylim(-2.25, 2.25)
+plt.tight_layout()
+plt.colorbar(); plt.savefig('fig_newton_limiter_fp32.png',format='png')
+
 
 # Test cost function as a function of Profile Parameters and current vec
 def j_func(p,j):
@@ -166,14 +179,14 @@ def j_func(p,j):
 
 #     return jnp.linalg.norm(r)
 
-j0 = j_func(jProfilePars,jcurr)
-t1=timer()
-djdprof, djdcurr = jax.jacfwd(j_func,argnums=(0,1,))(jProfilePars,jcurr) # Forward mode will take longer
-print("time Jax GS Jacfwd=",timer()-t1)
+# j0 = j_func(jProfilePars,jcurr)
+# t1=timer()
+# djdprof, djdcurr = jax.jacfwd(j_func,argnums=(0,1,))(jProfilePars,jcurr) # Forward mode will take longer
+# print("time Jax GS Jacfwd=",timer()-t1)
 
-t1=timer()
-djdprof, djdcurr = jax.grad(j_func,argnums=(0,1,))(jProfilePars,jcurr) # Reverse-mode
-print("time Jax GS Grad=",timer()-t1)
+# t1=timer()
+# djdprof, djdcurr = jax.grad(j_func,argnums=(0,1,))(jProfilePars,jcurr) # Reverse-mode
+# print("time Jax GS Grad=",timer()-t1)
 
 # print("Profile parameter sensitivity: ", djdprof)
 # print("Coil current sensitivity: ", djdcurr)
@@ -187,6 +200,6 @@ print("time Jax GS Grad=",timer()-t1)
 #     print(dj,(j1-j0)/dj)
 
 # Automatically check gradients by finite difference
-from jax.test_util import check_grads
+# from jax.test_util import check_grads
 
-check_grads(j_func,(jProfilePars,jcurr,),order=1,modes='fwd,rev')
+# check_grads(j_func,(jProfilePars,jcurr,),order=1,modes='fwd,rev')

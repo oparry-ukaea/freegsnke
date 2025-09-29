@@ -49,6 +49,7 @@ docs/machine_configs
 freegsnke/GSstaticsolver_pre*
 build/
 examples/.virtual_documents/*
+work/
 .virtual_documents/
 # Local Netlify folder
 .netlify
