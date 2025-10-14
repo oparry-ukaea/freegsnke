@@ -15,7 +15,7 @@ import time
 from timeit import default_timer as timer
 
 
-jax.config.update("jax_enable_x64", False)
+jax.config.update("jax_enable_x64", True)
 
 # # set paths
 # os.environ["ACTIVE_COILS_PATH"] = f"../machine_configs/MAST-U/MAST-U_like_active_coils.pickle"
@@ -132,16 +132,22 @@ jGS = j_GSstaticsolver.NKGSsolver(eq, jProfile, jLimiter)
 currentlist=eq.tokamak.getCurrents()
 jcurr=jnp.array([1.0*currentlist[key] for key in currentlist.keys()])
 jProfilePars=jProfile.init_params
-
+jGS.solve(
+    eq1.psi(),
+    jProfilePars,
+    jcurr,
+    target_relative_tolerance=1e-6,
+    use_newton=False,
+    verbose=False)
 t1=timer()
 # First JAX solve - will take longer because it is compiling code,
 # subsequent calls should be much faster
 psi_j=jGS.solve(
-    eq.psi(),
+    eq1.psi(),
     jProfilePars,
     jcurr,
-    target_relative_tolerance=1e-4,
-    use_newton=True,
+    target_relative_tolerance=1e-9,
+    use_newton=False,
     verbose=True)
 print("time Jax GS solve=",timer()-t1)
 
