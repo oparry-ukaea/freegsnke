@@ -15,13 +15,7 @@ import time
 from timeit import default_timer as timer
 
 
-jax.config.update("jax_enable_x64", True)
-
-# # set paths
-# os.environ["ACTIVE_COILS_PATH"] = f"../machine_configs/MAST-U/MAST-U_like_active_coils.pickle"
-# os.environ["PASSIVE_COILS_PATH"] = f"../machine_configs/MAST-U/MAST-U_like_passive_coils.pickle"
-# os.environ["WALL_PATH"] = f"../machine_configs/MAST-U/MAST-U_like_wall.pickle"
-# os.environ["LIMITER_PATH"] = f"../machine_configs/MAST-U/MAST-U_like_limiter.pickle"
+jax.config.update("jax_enable_x64", False)
 
 # build machine
 from freegsnke import build_machine
@@ -37,7 +31,7 @@ eq = equilibrium_update.Equilibrium(    tokamak=tokamak,
     Rmin=0.1, Rmax=2.0,   # Radial range
     Zmin=-2.2, Zmax=2.2,  # Vertical range
     nx=65,   # Number of grid points in the radial direction
-    ny=129,  # Number of grid points in the vertical direction
+    ny=65,  # Number of grid points in the vertical direction
     # psi=plasma_psi
 )  
 
@@ -85,18 +79,18 @@ GSStaticSolver.solve(
     eq=eq,
     profiles=profiles,
     constrain=None,
-    target_relative_tolerance=1e-9,
+    target_relative_tolerance=1e-4,
     max_solving_iterations=50,
     verbose=True
     )
 print("time GS solve=",timer()-t1)
 
 # Do it using JAX solver now
-from freegsnke import j_GSstaticsolver, j_limiter_func
+from freegsnke.jaxify import limiter_func
 
-jLimiter = j_limiter_func.Limiter_handler(eq, eq.tokamak.limiter)
+jLimiter = limiter_func.Limiter_handler(eq, eq.tokamak.limiter)
 
-from freegsnke.j_jtor import JConstrainPaxisIp, JLao85
+from freegsnke.jaxify.jtor import JConstrainPaxisIp, JLao85
 
 # jProfile = JConstrainPaxisIp(
 #     paxis=8e3,
@@ -118,7 +112,8 @@ jProfile = JConstrainPaxisIp(
 # jProfile = JLao85(Ip=6e5,fvac=0.5,alpha=alpha,beta=beta)
 
 # Initialise the solver
-jGS = j_GSstaticsolver.NKGSsolver(eq, jProfile, jLimiter)
+from freegsnke.jaxify import GSstaticsolver
+jGS = GSstaticsolver.NKGSsolver(eq, jProfile, jLimiter)
 
 # fig1, ax1 = plt.subplots(1, 1, figsize=(4, 8), dpi=80)
 # ax1.grid(True, which='both')
@@ -132,22 +127,22 @@ jGS = j_GSstaticsolver.NKGSsolver(eq, jProfile, jLimiter)
 currentlist=eq.tokamak.getCurrents()
 jcurr=jnp.array([1.0*currentlist[key] for key in currentlist.keys()])
 jProfilePars=jProfile.init_params
-jGS.solve(
-    eq1.psi(),
-    jProfilePars,
-    jcurr,
-    target_relative_tolerance=1e-6,
-    use_newton=False,
-    verbose=False)
+# jGS.solve(
+#     eq1.psi(),
+#     jProfilePars,
+#     jcurr,
+#     target_relative_tolerance=1e-6,
+#     use_newton=False,
+#     verbose=False)
 t1=timer()
 # First JAX solve - will take longer because it is compiling code,
 # subsequent calls should be much faster
 psi_j=jGS.solve(
-    eq1.psi(),
+    eq.psi(),
     jProfilePars,
     jcurr,
-    target_relative_tolerance=1e-9,
-    use_newton=False,
+    target_relative_tolerance=1e-4,
+    use_newton=True,
     verbose=True)
 print("time Jax GS solve=",timer()-t1)
 
@@ -164,8 +159,7 @@ plt.plot(eq.tokamak.wall.R, eq.tokamak.wall.Z, 'k', 3.0)
 ax1.set_xlim(0.1, 2.15)
 ax1.set_ylim(-2.25, 2.25)
 plt.tight_layout()
-plt.colorbar(); plt.savefig('fig_newton_limiter_fp32.png',format='png')
-
+plt.colorbar(); plt.show()
 
 # Test cost function as a function of Profile Parameters and current vec
 def j_func(p,j):

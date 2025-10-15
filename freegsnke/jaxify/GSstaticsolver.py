@@ -2,7 +2,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import freegs4e
-from . import j_nk_solver
+from . import nk_solver
 import interpax as ix
 import jax.scipy as jsp
 import equinox as eqx
@@ -97,6 +97,7 @@ class NKGSsolver(eqx.Module):
         generator=freegs4e.gradshafranov.GSsparse4thOrder(eq.R[0,0],eq.R[-1,0],eq.Z[0,0],eq.Z[0,-1])
          
         self.Ainv = jnp.linalg.inv(jexsp.BCSR.from_scipy_sparse(generator(nx,ny)).todense())
+
         # List of indices on the boundary
         bndry_indices = np.concatenate(
             [
@@ -143,11 +144,19 @@ class NKGSsolver(eqx.Module):
 
         iR = 1.0/(2.0*self.R*dR)
 
+        # set 2ndorder accurate derivatives first (at 1 to N-1)
         d2R=invdR2*(psi[2:,1:-1]+psi[:-2,1:-1]-2.0*psi[1:-1,1:-1])
         d2Z=invdZ2*(psi[1:-1,2:]+psi[1:-1,:-2]-2.0*psi[1:-1,1:-1])
         iRdR=iR[1:-1,1:-1]*(psi[2:,1:-1]-psi[:-2,1:-1])
 
         b=b.at[1:-1,1:-1].set(d2R+d2Z-iRdR)
+
+        # set fourth order derivatives first (at 2 to N-2)
+        d2R=invdR2*(-1/12*psi[4:,2:-2]+4/3*psi[3:-1,2:-2]-2.5*psi[2:-2,2:-2]+4/3*psi[1:-3,2:-2]-1/12*psi[:-4,2:-2])
+        d2Z=invdZ2*(-1/12*psi[2:-2,4:]+4/3*psi[2:-2,3:-1]-2.5*psi[2:-2,2:-2]+4/3*psi[2:-2,1:-3]-1/12*psi[2:-2,:-4])
+        iRdR=2.0*iR[2:-2,2:-2]*(-1/12*psi[4:,2:-2]+2/3*psi[3:-1,2:-2]-2/3*psi[1:-3,2:-2]+1/12*psi[:-4,2:-2])
+
+        b=b.at[2:-2,2:-2].set(d2R+d2Z-iRdR)
 
         return b
     
@@ -407,7 +416,8 @@ class NKGSsolver(eqx.Module):
         profilePars,
         currentvec,
         target_relative_tolerance,
-        use_newton=False, 
+        use_newton=False,
+        lag_Jacobian=1, 
         max_solving_iterations=50,
         Picard_handover=0.15,
         step_size=2.5,
@@ -471,20 +481,16 @@ class NKGSsolver(eqx.Module):
         nx,ny=init_psi.shape
         tokamak_psi = jnp.dot(currentvec,self.pgreen)
         trial_plasma_psi = jnp.asarray(init_psi).reshape(-1) - tokamak_psi
-        
-        solver_params = (target_relative_tolerance, 
-                        max_solving_iterations,
-                        Picard_handover,
-                        step_size,
-                        scaling_with_n,
-                        target_relative_unexplained_residual,  
-                        max_n_directions,
-                        clip,
-                        verbose,
-                        max_rel_update_size)
 
         # update solution
         if (use_newton):
+            solver_params = (
+                            target_relative_tolerance, 
+                            max_solving_iterations,
+                            Picard_handover,
+                            lag_Jacobian,
+                            verbose,
+                            )
             plasma_psi, _ = nsolve(self,
                             solver_params,
                             trial_plasma_psi,
@@ -492,6 +498,18 @@ class NKGSsolver(eqx.Module):
                             profilePars,
                             )
         else:
+            solver_params = (
+                            target_relative_tolerance, 
+                            max_solving_iterations,
+                            Picard_handover,
+                            step_size,
+                            scaling_with_n,
+                            target_relative_unexplained_residual,  
+                            max_n_directions,
+                            clip,
+                            verbose,
+                            max_rel_update_size,
+                            )
             plasma_psi, _ = nksolve(self,
                             solver_params,
                             trial_plasma_psi,
@@ -534,7 +552,7 @@ def nksolve(solver,
     picard_flag = 0
     nx,ny = solver.R.shape
 
-    log.append("Initial relative error =  " + str(rel_change))
+    log.append(f"Initial relative error = {rel_change:.2e}")
     if verbose:
         for x in log:
             print(x)
@@ -570,7 +588,7 @@ def nksolve(solver,
         else:
             log.append("-----")
             log.append("Newton-Krylov iteration: " + str(iter))
-            update, Abasis = j_nk_solver.Arnoldi_iteration(x0=trial_plasma_psi, #trial_current expansion point
+            update, Abasis = nk_solver.Arnoldi_iteration(x0=trial_plasma_psi, #trial_current expansion point
                                                 dx=starting_direction, #first vector for current basis
                                                 R0=res0, #circuit eq. residual at trial_current expansion point: Fresidual(trial_current)
                                                 F_function=lambda u: Ffunc(u),
@@ -579,6 +597,9 @@ def nksolve(solver,
                                                 target_relative_unexplained_residual=target_relative_unexplained_residual,  
                                                 max_n_directions=max_n_directions, # max number of basis vectors (must be less than number of modes + 1)
                                                 clip=clip)
+            log.append(
+                    f"...number of Krylov vectors used =  {(Abasis[1].shape[1])}"
+                )
         
         del_update = jnp.amax(update) - jnp.amin(update)
         if del_update / del_psi > max_rel_update_size:
@@ -592,8 +613,8 @@ def nksolve(solver,
         rel_change, del_psi = solver.relative_del_residual(res0, trial_plasma_psi)
         relative_change = 1.0 * rel_change
         history_norm_rel_change.append(norm_rel_change)
-        log.append("...relative error =  " + str(rel_change))
-
+        log.append(f"...relative error =  {rel_change:.2e}")
+        log.append("-----")
         if verbose:
             for x in log:
                 print(x)
@@ -658,16 +679,10 @@ def nsolve(solver,
     (target_relative_tolerance, 
     max_solving_iterations,
     Picard_handover,
-    step_size,
-    scaling_with_n,
-    target_relative_unexplained_residual,  
-    max_n_directions,
-    clip,
-    verbose,
-    max_rel_update_size) = solver_params 
+    lag_Jacobian,
+    verbose) = solver_params 
 
     res0 = solver.F_function2(trial_plasma_psi, tokamak_psi, profilePars)
-    norm_resid = jnp.linalg.norm(res0)
     norm_rel_change = solver.relative_norm_residual(res0, trial_plasma_psi)
     rel_change, del_psi = solver.relative_del_residual(res0, trial_plasma_psi)
     relative_change = 1.0 * rel_change
@@ -676,7 +691,7 @@ def nsolve(solver,
     picard_flag = 0
     nx,ny = solver.R.shape
 
-    log.append("Initial relative error =  " + str(rel_change))
+    log.append(f"Initial relative error = {rel_change:.2e}")
     if verbose:
         for x in log:
             print(x)
@@ -690,25 +705,21 @@ def nsolve(solver,
         r, dr = jax.jvp(Ffunc, (x,), (dx,))
         return dr
 
-    def condfun(err, iter):
+    def condfun(rel_change, iter):
         return jnp.logical_and(
-                    err > target_relative_tolerance, 
+                    rel_change > target_relative_tolerance, 
                     (iter < max_solving_iterations)
                     )
     rel_change = jnp.maximum(rel_change,2*target_relative_tolerance)
-    err=0.1
-    while (condfun(err, iter)):
+
+    while (condfun(rel_change, iter)):
         log.append("-----")
         log.append("Newton iteration: " + str(iter))
         psi0 = trial_plasma_psi
-        Jmat = jax.jacfwd(solver.F_function2,argnums=0)(trial_plasma_psi, tokamak_psi, profilePars)
+        if(jnp.mod(iter,lag_Jacobian)==0):
+            Jmat = jax.jacfwd(solver.F_function2,argnums=0)(trial_plasma_psi, tokamak_psi, profilePars)
         update = jnp.linalg.solve(Jmat,res0)
         err=jnp.linalg.norm(update)
-        
-        # del_update = jnp.amax(update) - jnp.amin(update)
-        # if del_update / del_psi > max_rel_update_size:
-        #     # Reduce the size of the update as found too large
-        #     update *= jnp.abs(max_rel_update_size * del_psi / del_update)
         
         trial_plasma_psi = trial_plasma_psi - update
         res0 = solver.F_function2(trial_plasma_psi, tokamak_psi, profilePars)
@@ -716,7 +727,9 @@ def nsolve(solver,
         rel_change, del_psi = solver.relative_del_residual(update, trial_plasma_psi)
         relative_change = 1.0 * rel_change
         history_norm_rel_change.append(norm_rel_change)
-        log.append("...relative error =  " + str(err))
+        log.append(f"...relative error =  {rel_change:.2e}")
+        log.append(f"...norm error =  {err:.2e}")
+        log.append("-----")
 
         if verbose:
             for x in log:
