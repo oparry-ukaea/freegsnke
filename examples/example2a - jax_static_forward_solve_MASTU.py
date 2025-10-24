@@ -15,7 +15,7 @@ import time
 from timeit import default_timer as timer
 
 
-jax.config.update("jax_enable_x64", False)
+jax.config.update("jax_enable_x64", True)
 
 # build machine
 from freegsnke import build_machine
@@ -31,44 +31,45 @@ eq = equilibrium_update.Equilibrium(    tokamak=tokamak,
     Rmin=0.1, Rmax=2.0,   # Radial range
     Zmin=-2.2, Zmax=2.2,  # Vertical range
     nx=65,   # Number of grid points in the radial direction
-    ny=65,  # Number of grid points in the vertical direction
+    ny=129,  # Number of grid points in the vertical direction
     # psi=plasma_psi
 )  
 
 from freegsnke.jtor_update import ConstrainPaxisIp
 
 # Diverted plasma
-# profiles = ConstrainPaxisIp(
-#     eq=eq,
-#     paxis=8e3,
-#     Ip=6e5,
-#     fvac=0.5,
-#     alpha_m=1.8,
-#     alpha_n=1.2
-# )
-# Limited plasma 
 profiles = ConstrainPaxisIp(
     eq=eq,
-    paxis=6e3,
-    Ip=4e5,
+    paxis=8e3,
+    Ip=6e5,
     fvac=0.5,
     alpha_m=1.8,
     alpha_n=1.2
 )
+# Limited plasma 
+# profiles = ConstrainPaxisIp(
+#     eq=eq,
+#     paxis=6e3,
+#     Ip=4e5,
+#     fvac=0.5,
+#     alpha_m=1.8,
+#     alpha_n=1.2
+# )
 
 from freegsnke import GSstaticsolver
 GSStaticSolver = GSstaticsolver.NKGSsolver(eq)
 
 # load the coil currents
 import pickle
-# with open('simple_diverted_currents_PaxisIp.pk', 'rb') as f:
-with open('simple_limited_currents_PaxisIp.pk', 'rb') as f:
+with open('simple_diverted_currents_PaxisIp.pk', 'rb') as f:
+# with open('simple_limited_currents_PaxisIp.pk', 'rb') as f:
 
     currents_dict = pickle.load(f)
     
 # assign currents to the eq object
 for key in currents_dict.keys():
-    eq.tokamak[key].current = currents_dict[key]
+    eq.tokamak.set_coil_current(coil_label=key, current_value=currents_dict[key])
+
     
 eq.tokamak.getCurrents()
 eq1=deepcopy(eq)
@@ -79,7 +80,7 @@ GSStaticSolver.solve(
     eq=eq,
     profiles=profiles,
     constrain=None,
-    target_relative_tolerance=1e-4,
+    target_relative_tolerance=1e-8,
     max_solving_iterations=50,
     verbose=True
     )
@@ -92,21 +93,21 @@ jLimiter = limiter_func.Limiter_handler(eq, eq.tokamak.limiter)
 
 from freegsnke.jaxify.jtor import JConstrainPaxisIp, JLao85
 
-# jProfile = JConstrainPaxisIp(
-#     paxis=8e3,
-#     Ip=6e5,
-#     fvac=0.5,
-#     alpha_m=1.8,
-#     alpha_n=1.2
-# )
-
 jProfile = JConstrainPaxisIp(
-    paxis=6e3,
-    Ip=4e5,
+    paxis=8e3,
+    Ip=6e5,
     fvac=0.5,
     alpha_m=1.8,
     alpha_n=1.2
 )
+
+# jProfile = JConstrainPaxisIp(
+#     paxis=6e3,
+#     Ip=4e5,
+#     fvac=0.5,
+#     alpha_m=1.8,
+#     alpha_n=1.2
+# )
 
 # alpha, beta = profiles.Lao_parameters(4,4)
 # jProfile = JLao85(Ip=6e5,fvac=0.5,alpha=alpha,beta=beta)
@@ -141,25 +142,25 @@ psi_j=jGS.solve(
     eq.psi(),
     jProfilePars,
     jcurr,
-    target_relative_tolerance=1e-4,
-    use_newton=True,
+    target_relative_tolerance=1e-8,
+    use_newton=False,
     verbose=True)
 print("time Jax GS solve=",timer()-t1)
 
 # check psi field
 print("Difference between Jax and default solver:",jnp.linalg.norm(psi_j-eq.psi()))
 
-fig1, ax1 = plt.subplots(1, 1, figsize=(5, 8), dpi=80)
-#ax1.grid(True, which='both')
-#plt.contourf(eq.R, eq.Z, np.abs(eq.psi()-psi_j),50)
-plt.contour(eq.R,eq.Z,eq.psi(),20,colors='black')
-plt.contourf(eq.R, eq.Z, np.abs((eq.psi()-psi_j)),50,cmap='hot_r')
-eq.tokamak.plot(axis=ax1, show=False)
-plt.plot(eq.tokamak.wall.R, eq.tokamak.wall.Z, 'k', 3.0)
-ax1.set_xlim(0.1, 2.15)
-ax1.set_ylim(-2.25, 2.25)
-plt.tight_layout()
-plt.colorbar(); plt.show()
+# fig1, ax1 = plt.subplots(1, 1, figsize=(5, 8), dpi=80)
+# #ax1.grid(True, which='both')
+# #plt.contourf(eq.R, eq.Z, np.abs(eq.psi()-psi_j),50)
+# plt.contour(eq.R,eq.Z,eq.psi(),20,colors='black')
+# plt.contourf(eq.R, eq.Z, np.abs((eq.psi()-psi_j)),50,cmap='hot_r')
+# eq.tokamak.plot(axis=ax1, show=False)
+# plt.plot(eq.tokamak.wall.R, eq.tokamak.wall.Z, 'k', 3.0)
+# ax1.set_xlim(0.1, 2.15)
+# ax1.set_ylim(-2.25, 2.25)
+# plt.tight_layout()
+# plt.colorbar(); plt.show()
 
 # Test cost function as a function of Profile Parameters and current vec
 def j_func(p,j):

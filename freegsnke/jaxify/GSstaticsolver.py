@@ -14,6 +14,32 @@ from jax.experimental import sparse as jexsp
 # Physical constants
 mu0 = 4e-7 * jnp.pi
 
+class AbstractLinearSolver(eqx.Module):
+    A: jax.Array
+
+    def __init__(self, A):
+        self.A = A
+
+
+class SparseLinearSolver(AbstractLinearSolver):
+
+    def __init__(self, A):
+        super().__init__(A)
+        
+    def __call__(self, rhs):
+        return jexsp.linalg.spsolve(self.A.data,
+                                    self.A.indices,
+                                    self.A.indptr,
+                                    rhs)
+
+class DenseLinearSolver(AbstractLinearSolver):
+
+    def __init__(self, A):
+        super().__init__(A)
+
+    def __call__(self, rhs):
+        return jnp.dot(self.A, rhs)
+
 class NKGSsolver(eqx.Module):
 
     """Solver for the non-linear forward Grad Shafranov (GS) 
@@ -33,11 +59,11 @@ class NKGSsolver(eqx.Module):
     pgreen: jax.Array
     bndry_indices: jax.Array
     greenfunc: jax.Array
-    Ainv: jax.Array
     profile: eqx.Module
     limiter: eqx.Module
+    linear_GS_solver: eqx.Module
      
-    def __init__(self, eq, profile, limiter_func):
+    def __init__(self, eq, profile, limiter_func, use_sparse_solver=False, precompute_boundary_greens=True):
 
         """Instantiates the solver object.
         Based on the domain grid of the input equilibrium object, it prepares
@@ -95,9 +121,14 @@ class NKGSsolver(eqx.Module):
 
         #linear solver for del*Psi=RHS
         generator=freegs4e.gradshafranov.GSsparse4thOrder(eq.R[0,0],eq.R[-1,0],eq.Z[0,0],eq.Z[0,-1])
-         
-        self.Ainv = jnp.linalg.inv(jexsp.BCSR.from_scipy_sparse(generator(nx,ny)).todense())
-
+        
+        if (use_sparse_solver):
+            A = jexsp.BCSR.from_scipy_sparse(generator(nx,ny))
+            self.linear_GS_solver = SparseLinearSolver(A)
+        else:
+            A = jnp.linalg.inv(jexsp.BCSR.from_scipy_sparse(generator(nx,ny)).todense())
+            self.linear_GS_solver = DenseLinearSolver(A)
+        
         # List of indices on the boundary
         bndry_indices = np.concatenate(
             [
@@ -108,17 +139,20 @@ class NKGSsolver(eqx.Module):
             ]
         )
         self.bndry_indices = jnp.asarray(bndry_indices)
-        
-        # matrices of responses of boundary locations to each grid positions
-        greenfunc = Greens(R[jnp.newaxis,:,:], 
-                           Z[jnp.newaxis,:,:], 
-                           R_1D[self.bndry_indices[:,0]][:,jnp.newaxis,jnp.newaxis], 
-                           Z_1D[self.bndry_indices[:,1]][:,jnp.newaxis,jnp.newaxis])
-        # Prevent infinity/nan by removing Greens(x,y;x,y) 
-        zeros = jnp.ones_like(greenfunc)
-        zeros=zeros.at[jnp.arange(len(self.bndry_indices)), self.bndry_indices[:,0], self.bndry_indices[:,1]].set(0.0)
-        self.greenfunc = greenfunc*zeros*self.dRdZ
 
+        if (precompute_boundary_greens):
+            # matrices of responses of boundary locations to each grid positions
+            greenfunc = Greens(R[jnp.newaxis,:,:], 
+                            Z[jnp.newaxis,:,:], 
+                            R_1D[self.bndry_indices[:,0]][:,jnp.newaxis,jnp.newaxis], 
+                            Z_1D[self.bndry_indices[:,1]][:,jnp.newaxis,jnp.newaxis])
+            # Prevent infinity/nan by removing Greens(x,y;x,y) 
+            zeros = jnp.ones_like(greenfunc)
+            zeros=zeros.at[jnp.arange(len(self.bndry_indices)), self.bndry_indices[:,0], self.bndry_indices[:,1]].set(0.0)
+            self.greenfunc = greenfunc*zeros*self.dRdZ
+        else:
+            self.greenfunc = None
+        
         self.profile = profile
         self.limiter = limiter_func
         # zeromach = jnp.asarray(jnp.pi)
@@ -159,7 +193,7 @@ class NKGSsolver(eqx.Module):
         b=b.at[2:-2,2:-2].set(d2R+d2Z-iRdR)
 
         return b
-    
+
     @jax.jit
     def critpoints(self, psi):
         dR = self.R[1, 0] - self.R[0, 0]
@@ -264,14 +298,14 @@ class NKGSsolver(eqx.Module):
         psin = (psi - psio) / (psix - psio)
 
         # Condition that 0 < psin < 1
-        s1=jnp.where(psin>=0,1,0)*jnp.where(psin<=1,1,0)
+        s1=(psin>=0)*(psin<=1)
 
         # Condition that (R-Rx)*(R0-Rx) + (Z-Zx)*(Z0-ZX) > 0
         m2=(self.R-Rx)*(Ro-Rx) + (self.Z-Zx)*(Zo-Zx)
-        s2=jnp.where(m2>0,1,0)
+        s2=(m2>0)
 
         m3=(self.R-xpoint[1,0])*(Ro-xpoint[1,0]) + (self.Z-xpoint[1,1])*(Zo-xpoint[1,1])
-        s3=jnp.where(m3>0,1,0)
+        s3=(m3>0)
 
         mask=s1*s2*s3
 
@@ -310,15 +344,37 @@ class NKGSsolver(eqx.Module):
         ppsi = psi.reshape(nx,ny)
         jtor = self.jtor(profilePars, ppsi)    
         rhs = -mu0*self.R*jtor
+        zeroprec = self.R[0,0]-self.R[0,0]
+
+        def _psibound(x,y):
+            greenfunc = Greens(self.R, self.Z, self.R[x, y], self.Z[x, y])
+            # Prevent infinity/nan by removing (x,y) point
+            greenfunc = greenfunc.at[x, y].set(zeroprec)
+            # Integrate over the domain
+            psival = jnp.sum(jnp.sum(greenfunc * jtor))
+
+            return psival
+
+        _psibound_vmap=jax.jit(jax.vmap(_psibound,in_axes=(0,0)))
         
         #calculates and assignes boundary conditions
         psi_boundary = jnp.zeros_like(self.R)
-        psi_bnd = jnp.sum(self.greenfunc*jtor[jnp.newaxis,:,:], axis=(-1,-2))
-        psi_boundary=psi_boundary.at[:, 0].set(psi_bnd[:nx])
-        psi_boundary=psi_boundary.at[:, -1].set(psi_bnd[nx:2*nx])
-        psi_boundary=psi_boundary.at[0, 1:ny-1].set(psi_bnd[2*nx:2*nx+ny-2])
-        psi_boundary=psi_boundary.at[-1, 1:ny-1].set(psi_bnd[2*nx+ny-2:])
+        if self.greenfunc is None:
+            # calculate greenfunctions on-the-fly using vmapped function
+            xb, yb = self.bndry_indices[:,0], self.bndry_indices[:,0]
+            psi_bnd = _psibound_vmap(xb, yb)
+            psi_boundary = psi_boundary.at[xb,yb].set(psi_bnd*self.dRdZ)
+        else:
+            # weighted sum over the last two axes.
+            # "contract" axis 1 of greenfunc with axis 0 of jtor
+            # contract axis 2 of greenfunc with axis 1 of jtor
+            psi_bnd = jnp.tensordot(self.greenfunc, jtor, axes=([1, 2], [0, 1]))
 
+            psi_boundary=psi_boundary.at[:, 0].set(psi_bnd[:nx])
+            psi_boundary=psi_boundary.at[:, -1].set(psi_bnd[nx:2*nx])
+            psi_boundary=psi_boundary.at[0, 1:ny-1].set(psi_bnd[2*nx:2*nx+ny-2])
+            psi_boundary=psi_boundary.at[-1, 1:ny-1].set(psi_bnd[2*nx+ny-2:])
+        
         rhs=rhs.at[0, 1:ny-1].set(psi_boundary[0, 1:ny-1])
         rhs=rhs.at[:, 0].set(psi_boundary[:, 0])
         rhs=rhs.at[-1, 1:ny-1].set(psi_boundary[-1, 1:ny-1])
@@ -369,7 +425,7 @@ class NKGSsolver(eqx.Module):
         """ 
         psi = plasma_psi + tokamak_psi
         rhs = self.freeboundary(profilePars, psi)
-        residual = plasma_psi - jnp.dot(self.Ainv,rhs.reshape(-1))
+        residual = plasma_psi - self.linear_GS_solver(rhs.reshape(-1))
 
         return residual
 
