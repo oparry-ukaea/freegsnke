@@ -944,7 +944,6 @@ def Greens(Rc, Zc, R, Z):
 # https://www.moshier.net/methprog.pdf
 # pages 387 and 392
 
-@jax.jit
 @jax.custom_jvp
 def ellipk(m):
     A=jnp.array([1.37982864606273237150E-4,
@@ -974,14 +973,12 @@ def ellipk(m):
     return jnp.polyval(A,1-m) - jnp.log(1-m)*jnp.polyval(B,1-m)
 
 @ellipk.defjvp
-@jax.jit
 def _ellipk_jvp(primals, tangents):
     m, = primals
     m_dot, = tangents
     dKdk = m_dot*((ellipe(m)/((2*m)*(1-m))) - (ellipk(m)/(2*m)))
     return ellipk(m), dKdk
 
-@jax.jit
 @jax.custom_jvp
 def ellipe(m):
     A=jnp.array([1.53552577301013293365E-4,
@@ -1011,7 +1008,6 @@ def ellipe(m):
     return jnp.polyval(A,1-m) - jnp.log(1-m)*((1-m)*jnp.polyval(B,1-m))
 
 @ellipe.defjvp
-@jax.jit
 def _ellipe_jvp(primals, tangents):
     m, = primals
     m_dot, = tangents
