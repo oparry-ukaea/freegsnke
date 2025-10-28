@@ -45,8 +45,7 @@ class NKGSsolver(eqx.Module):
     """Solver for the non-linear forward Grad Shafranov (GS) 
     static problem. Here, the GS problem is written as a root
     problem in the plasma flux psi. This root problem is 
-    passed to and solved by the NewtonKrylov solver itself,
-    class nk_solver.
+    solved by a Newton method or a Newton-Krylov method.
 
     The solution domain is set at instantiation time, through the 
     input freeGS equilibrium object.
@@ -79,10 +78,19 @@ class NKGSsolver(eqx.Module):
              use the grid domain set at instantiation time. Re-instantiation 
              is necessary in order to change the propertes of either grid or
              domain.
-
+        profile: a jaxify-ed profile object as defined in jaxify.jtor that
+                defines the toroidal current profile parametrization
+        limiter_func: a jaxify-ed limiter object as defined in 
+                     jaxify.limiter_func that defines the limtier domain
+        use_sparse_solver: Boolean to define whether a sparse linear solver
+                          is used. If False, dense matrix inverse is 
+                          calculated, stored, and used in every iteration.
+        precompute_boundary_greens: Boolean to define whether the Green's
+                        functions for the boundary condition is
+                        calculated and stored or computed on-the-fly.
+                        If True, self.greenfunc is stored and used.        
         """
      
-   
         #eq is an Equilibrium instance, it has to have the same domain and grid as 
         #the ones the solver will be called on
         
@@ -165,6 +173,15 @@ class NKGSsolver(eqx.Module):
     def gs_oper(self, psi):
         """
         Apply the full elliptic operator to 2D field L*psi_plasma
+
+        Arguments:
+        ----------
+        psi: jax.Array of size (nx,ny)
+
+        Returns:
+        --------
+        b: jax.Array of size (nx,ny)
+           d2(psi)dR2 + d2(psi)/dZ2 + 1.0/R*d(psi)/dR
         """
 
         nx,ny = psi.shape
@@ -196,6 +213,29 @@ class NKGSsolver(eqx.Module):
 
     @jax.jit
     def critpoints(self, psi):
+        """
+        Calculate the critical (O-,X-) points 
+
+        Arguments:
+        ----------
+        psi: jax.Array of size (nx,ny)
+             Total Psi (plasma + metal)
+        Returns:
+        --------
+        oo: jax.Array of size (critsize,3)
+            O-Points in an array with static size
+            Each row has (R_o, Z_o, Psi_o)
+        xx: jax.Array of size (critsize,3)
+            O-Points in an array with static size
+            Each row has (R_x, Z_x, Psi_x)
+
+        critsize is needed to ensure that the output
+        of the function is always the same size so that
+        JAX can trace the function. This means that not 
+        all the values in the array are physical, and
+        we only use the top few as needed.
+        """
+
         dR = self.R[1, 0] - self.R[0, 0]
         dZ = self.Z[0, 1] - self.Z[0, 0]
         r1d = self.R[:,0]
@@ -288,6 +328,27 @@ class NKGSsolver(eqx.Module):
 
     @jax.jit
     def mask(self, psi, opoint, xpoint):
+        """
+        Calculate the physical plasma domain 
+
+        Arguments:
+        ----------
+        psi: jax.Array of size (nx,ny)
+            Total Psi (plasma + metal)
+        oo: jax.Array of size (critsize,3)
+            O-Points in an array with static size
+            Each row has (R_o, Z_o, Psi_o)
+
+        xx: jax.Array of size (critsize,3)
+            O-Points in an array with static size
+            Each row has (R_x, Z_x, Psi_x)
+
+        Returns:
+        --------
+        mask: jax.Array of size (nx,ny)
+            Integer array defining 1 in plasma domain
+            and 0 outside plasma domain.
+        """
 
         mask=jnp.zeros(psi.shape)
 
@@ -313,6 +374,21 @@ class NKGSsolver(eqx.Module):
 
     @jax.jit
     def jtor(self, profilePars, psi):
+        """
+        Calculate the toroidal plasma current 
+
+        Arguments:
+        ----------
+        psi: jax.Array of size (nx,ny)
+            Total Psi (plasma + metal)
+        profilePars: Tuple containing (Ip, (plasma_pars)) 
+            defining toroidal current profile
+
+        Returns:
+        --------
+        jtor: jax.Array of size (nx,ny)
+            Toroidal plasma current density
+        """
 
         opts, xpts = self.critpoints(psi)
         diverted_mask = self.mask(psi, opts, xpts)
@@ -325,18 +401,20 @@ class NKGSsolver(eqx.Module):
 
     @jax.jit
     def freeboundary(self, profilePars, psi):
-        """Imposes boundary conditions on set of boundary points. 
+        """
+        Calculate the RHS of GS problem and impose boundary
+        conditions. 
 
-        Parameters
+        Arguments
         ----------
-        plasma_psi : np.array of size eq.nx*eq.ny
-            magnetic flux due to the plasma
-        tokamak_psi : np.array of size eq.nx*eq.ny
-            magnetic flux due to the tokamak alone, including all metal currents,
-            in both active coils and passive structures
-        profiles : freeGS profile object
-            profile object describing target plasma properties, 
-            used to calculate current density jtor
+        psi : jax.Array of size (nx,ny)
+            Total psi (metal + plasma)
+        profilePars: Tuple containing (Ip, (plasma_pars)) 
+            defining toroidal current profile
+
+        Returns
+        -------
+        rhs: jax.Array of size (nx,ny)
         """
       
         #jtor and RHS given tokamak_psi above and the input plasma_psi
@@ -384,6 +462,28 @@ class NKGSsolver(eqx.Module):
 
     @jax.jit
     def F_function2(self, plasma_psi, tokamak_psi, profilePars):
+        """
+        Nonlinear Grad Shafranov equation written as a root problem
+        F(plasma_psi) \equiv \delta* (plasma_psi) - J(plasma_psi + tokamak_psi)
+
+        The plasma_psi that solves the Grad Shafranov problem satisfies
+        F(plasma_psi) = 0
+
+        Arguments
+        ----------
+        plasma_psi : 1-D jax.Array of size (nx*ny)
+            Magnetic flux contribution from plasma
+        tokamak_psi : 1-D jax.Array of size (nx*ny)
+            Magnetic flux contribution from metal objects
+            (coils + passive structures)
+        profilePars: Tuple containing (Ip, (plasma_pars)) 
+            defining toroidal current profile
+
+        Returns
+        -------
+        resid: 1-D jax.Array of size (nx*ny)
+            Residual of GS problem 
+        """
 
         nx,ny = self.R.shape
         psi = plasma_psi + tokamak_psi
@@ -402,9 +502,10 @@ class NKGSsolver(eqx.Module):
     @jax.jit
     def F_function(self, plasma_psi, tokamak_psi, profilePars): 
         """Nonlinear Grad Shafranov equation written as a root problem
-        F(plasma_psi) \equiv [\delta* - J](plasma_psi)
+        F(plasma_psi) \equiv plasma_psi - \delta*^{-1}( J(plasma_psi + tokamak_psi))
+
         The plasma_psi that solves the Grad Shafranov problem satisfies
-        F(plasma_psi) = [\delta* - J](plasma_psi) = 0
+        F(plasma_psi) = 0
 
         
         Parameters
@@ -486,52 +587,47 @@ class NKGSsolver(eqx.Module):
     ):
         
         """The method that actually solves the GS problem.
-        The problem is specified by the 2 freeGS objects eq and profiles.
-        The first specifies the metal currents (throught eq.tokamak)
-        and the second specifies the desired plasma properties 
-        (i.e. plasma current and profile functions).
-        
-        The plasma_psi which solves the given GS problem is assigned to 
-        the input eq, and can be found at eq.plasma_psi.
+        The problem is specified by the profile parameters and currents.       
 
-        Parameters
+        Arguments:
         ----------
-        profiles : freeGS profile object
-            Specifies the target properties of the plasma.
-            These are used to calculate Jtor(psi)
+        init_psi : jax.Array of size (nx,ny)
+            Initial guess for the nonlinear solver
+        profilePars: Tuple of Profile Parameters
+        currentvec: jax.Array of 1-D currents vector 
         target_relative_tolerance : float
-            NK iterations are interrupted when this criterion is 
+            NK/NR iterations are interrupted when this criterion is 
             satisfied. Relative convergence
+        use_newton: boolean 
+            Choose whether Newton-Krylov or Newton-Raphson method is used
+        lag_Jacobian: int
+            How often to recalculate the Jacobian in the NR method
+            1 means every iteration, 2 means every 2 iterations, etc
         max_solving_iterations : int
             NK iterations are interrupted when this limit is surpassed
         Picard_handover : float
             Value of relative tolerance above which a Picard iteration
             is performed instead of a full NK call
         step_size : float
-            l2 norm of proposed step
+            l2 norm of proposed step, in units of the size of the residual R0
         scaling_with_n : float
-            allows to further scale dx candidate steps by factor
-            (1 + self.n_it)**scaling_with_n
-        target_relative_explained_residual : float between 0 and 1
-            terminates iteration when exploration can explain this 
-            fraction of the initial residual R0
+            allows to further scale the proposed steps as a function of the
+            number of previous steps already attempted
+            (1 + n_it)**scaling_with_n
+        target_relative_unexplained_residual : float between 0 and 1
+            terminates internal iterations when the considered directions
+            can (linearly) explain such a fraction of the initial residual R0
         max_n_directions : int
-            terminates iteration even though condition on 
+            terminates iteration even though condition on
             explained residual is not met
-        max_Arnoldi_iterations : int
-            terminates iteration after attempting to explore
-            this number of directions
-        max_collinearity : float between 0 and 1
-            rejects a candidate direction if resulting residual 
-            is collinear to any of those stored previously
+        max_rel_update_size : float
+            maximum relative update, in norm, to plasma_psi. If larger than this,
+            the norm of the update is reduced
         clip : float
-            maximum step size for each explored direction, in units 
-            of exploratory step dx_i
-        threshold : float 
-            catches cases of untreated (partial) collinearity 
-        clip_hard : float
-            maximum step size for cases of untreated (partial) collinearity
-        
+            maximum size of the update due to each explored direction, in units
+            of exploratory step used to calculate the finite difference derivative
+        verbose : bool
+            flag to allow progress printouts
         """
         
         nx,ny=init_psi.shape
@@ -547,7 +643,7 @@ class NKGSsolver(eqx.Module):
                             lag_Jacobian,
                             verbose,
                             )
-            plasma_psi, _ = nsolve(self,
+            plasma_psi, _ = _nsolve(self,
                             solver_params,
                             trial_plasma_psi,
                             tokamak_psi,
@@ -566,7 +662,7 @@ class NKGSsolver(eqx.Module):
                             verbose,
                             max_rel_update_size,
                             )
-            plasma_psi, _ = nksolve(self,
+            plasma_psi, _ = _nksolve(self,
                             solver_params,
                             trial_plasma_psi,
                             tokamak_psi,
@@ -577,7 +673,7 @@ class NKGSsolver(eqx.Module):
         return (plasma_psi+tokamak_psi).reshape(nx,ny)
 
 @partial(jax.custom_jvp, nondiff_argnums=(0,1))
-def nksolve(solver,
+def _nksolve(solver,
             solver_params,
             trial_plasma_psi,
             tokamak_psi, 
@@ -680,8 +776,8 @@ def nksolve(solver,
 
     return (trial_plasma_psi, Abasis)
 
-@nksolve.defjvp
-def nksolve_jvp(solver, solver_params, primals, tangents):
+@_nksolve.defjvp
+def _nksolve_jvp(solver, solver_params, primals, tangents):
 
     trial_plasma_psi, tokamak_psi, profilePars, = primals
     dppsi, dtpsi, dprofile, = tangents
@@ -698,7 +794,7 @@ def nksolve_jvp(solver, solver_params, primals, tangents):
     verbose,
     max_rel_update_size) = solver_params 
 
-    opsi, Abasis = nksolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
+    opsi, Abasis = _nksolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
     psi0, Gloc, Qloc = Abasis
 
     def Ffunc(x):
@@ -722,7 +818,7 @@ def nksolve_jvp(solver, solver_params, primals, tangents):
     return (primal_out, (tangent_out,(jnp.zeros_like(psi0), jnp.zeros_like(Gloc), jnp.zeros_like(Qloc))) )
 
 @partial(jax.custom_jvp,nondiff_argnums=(0,1))
-def nsolve(solver,
+def _nsolve(solver,
             solver_params,
             trial_plasma_psi,
             tokamak_psi, 
@@ -773,6 +869,7 @@ def nsolve(solver,
         log.append("Newton iteration: " + str(iter))
         psi0 = trial_plasma_psi
         if(jnp.mod(iter,lag_Jacobian)==0):
+            log.append("...Assembling Jacobian...")
             Jmat = jax.jacfwd(solver.F_function2,argnums=0)(trial_plasma_psi, tokamak_psi, profilePars)
         update = jnp.linalg.solve(Jmat,res0)
         err=jnp.linalg.norm(update)
@@ -796,13 +893,13 @@ def nsolve(solver,
 
     return (trial_plasma_psi, (psi0, Jmat))
 
-@nsolve.defjvp
-def nsolve_jvp(solver, solver_params, primals, tangents):
+@_nsolve.defjvp
+def _nsolve_jvp(solver, solver_params, primals, tangents):
 
     trial_plasma_psi, tokamak_psi, profilePars, = primals
     dppsi, dtpsi, dprofile, = tangents
 
-    opsi, basis = nsolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
+    opsi, basis = _nsolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
     psi0, Jmat = basis
 
     def Ffunc(x):
@@ -816,27 +913,6 @@ def nsolve_jvp(solver, solver_params, primals, tangents):
     tangent_out = jnp.linalg.solve(Jmat, -jvp_res0)
 
     return (primal_out, (tangent_out, (jnp.zeros_like(psi0), jnp.zeros_like(Jmat))))
-
-# def nksolve_fwd(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars):
-
-#     psi_guess, basis = nksolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
-
-#     return (psi_guess, basis), (psi_guess,tokamak_psi, profilePars, basis)
-
-# def nksolve_bwd(solver, solver_params, res, v):
-    
-#     psi_guess, tokamak_psi, profilePars, basis = res
-#     nx,ny = solver.R.shape
-#     psi0, Gloc, Qloc = basis
-
-    
-#     _, vjp_params = jax.vjp(lambda c,p : solver.F_function(psi_guess, c, p), tokamak_psi, profilePars)
-
-#     res1 = vjp_params(u)
-    
-#     return jnp.zeros_like(psi_guess), res1[0], res1[1]
-
-# nksolve.defvjp(nksolve_fwd, nksolve_bwd)
 
 @jax.jit
 def Greens(Rc, Zc, R, Z):
@@ -861,7 +937,15 @@ def Greens(Rc, Zc, R, Z):
         / k
     )
 
+# Elliptical functions
+# Polynomial expressions taken from
+# Methods and Programs for Mathematical Functions
+# by Stephen L. Moshier, E. Horwood, 1989
+# https://www.moshier.net/methprog.pdf
+# pages 387 and 392
+
 @jax.jit
+@jax.custom_jvp
 def ellipk(m):
     A=jnp.array([1.37982864606273237150E-4,
                 2.28025724005875567385E-3,
@@ -889,7 +973,16 @@ def ellipk(m):
                 ])
     return jnp.polyval(A,1-m) - jnp.log(1-m)*jnp.polyval(B,1-m)
 
+@ellipk.defjvp
 @jax.jit
+def _ellipk_jvp(primals, tangents):
+    m, = primals
+    m_dot, = tangents
+    dKdk = m_dot*((ellipe(m)/((2*m)*(1-m))) - (ellipk(m)/(2*m)))
+    return ellipk(m), dKdk
+
+@jax.jit
+@jax.custom_jvp
 def ellipe(m):
     A=jnp.array([1.53552577301013293365E-4,
                 2.50888492163602060990E-3,
@@ -916,18 +1009,6 @@ def ellipe(m):
                 ])
 
     return jnp.polyval(A,1-m) - jnp.log(1-m)*((1-m)*jnp.polyval(B,1-m))
-
-ellipk = jax.custom_jvp(ellipk)
-
-@ellipk.defjvp
-@jax.jit
-def _ellipk_jvp(primals, tangents):
-    m, = primals
-    m_dot, = tangents
-    dKdk = m_dot*((ellipe(m)/((2*m)*(1-m))) - (ellipk(m)/(2*m)))
-    return ellipk(m), dKdk
-
-ellipe = jax.custom_jvp(ellipe)
 
 @ellipe.defjvp
 @jax.jit
