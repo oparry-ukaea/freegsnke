@@ -10,6 +10,7 @@ from timeit import default_timer as timer
 from functools import partial
 import warnings
 from jax.experimental import sparse as jexsp
+from . import full_mask
 
 # Physical constants
 mu0 = 4e-7 * jnp.pi
@@ -55,9 +56,9 @@ class NKGSsolver(eqx.Module):
     R: jax.Array
     Z: jax.Array
     dRdZ: float
-    pgreen: jax.Array
+    coil_green: jax.Array
     bndry_indices: jax.Array
-    greenfunc: jax.Array
+    bndry_green: jax.Array
     profile: eqx.Module
     limiter: eqx.Module
     linear_GS_solver: eqx.Module
@@ -108,24 +109,9 @@ class NKGSsolver(eqx.Module):
         dR = R[1, 0] - R[0, 0]
         dZ = Z[0, 1] - Z[0, 0]
         self.dRdZ = dR*dZ
-
-        greenlist={}
-        currentlist={}
-        ii=0
-        for item in eq._pgreen:
-            greenitem=0.0
-            if (type(eq._pgreen[item]) is dict):
-                jj=0
-                for obj in eq._pgreen[item]:
-                    greenitem=greenitem+eq._pgreen[item][obj]*eq.tokamak.coils[ii][1].coils[jj][2]
-                    jj=jj+1
-            else:
-                greenitem=eq._pgreen[item]
-            greenlist[item]=jnp.asarray(greenitem)
-            currentlist[item]=jnp.asarray(eq.tokamak.getCurrents()[item])
-            ii=ii+1
         
-        self.pgreen=jnp.array([greenlist[key].reshape(-1) for key in greenlist.keys()])
+        ncoils = eq._vgreen.shape[0]
+        self.coil_green=jnp.array(eq._vgreen.reshape((ncoils,nx*ny)))
 
         #linear solver for del*Psi=RHS
         generator=freegs4e.gradshafranov.GSsparse4thOrder(eq.R[0,0],eq.R[-1,0],eq.Z[0,0],eq.Z[0,-1])
@@ -157,12 +143,19 @@ class NKGSsolver(eqx.Module):
             # Prevent infinity/nan by removing Greens(x,y;x,y) 
             zeros = jnp.ones_like(greenfunc)
             zeros=zeros.at[jnp.arange(len(self.bndry_indices)), self.bndry_indices[:,0], self.bndry_indices[:,1]].set(0.0)
-            self.greenfunc = greenfunc*zeros*self.dRdZ
+            self.bndry_green = greenfunc*zeros*self.dRdZ
         else:
-            self.greenfunc = None
+            self.bndry_green = None
         
         self.profile = profile
         self.limiter = limiter_func
+
+        # Test run
+        init_params=profile.init_params
+        ppsi=eq.plasma_psi.reshape(-1)
+        tpsi=eq.tokamak.getPsitokamak(vgreen=eq._vgreen).reshape(-1)
+        self.F_function(ppsi,tpsi,init_params)
+        self.F_function2(ppsi,tpsi,init_params)
         # zeromach = jnp.asarray(jnp.pi)
 		# while (1.0+zeromach/2.0 > 1.0):
 		# 	zeromach = zeromach/2.0
@@ -265,7 +258,7 @@ class NKGSsolver(eqx.Module):
             (A[1:-1,1:-1]<A[:-2,2:]) &
             (A[1:-1,1:-1]<A[:-2,:-2]),1,0))
 
-        ir, iz = jnp.nonzero(A2,size=30)
+        ir, iz = jnp.nonzero(A2,size=200)
 
         @jax.jit
         def _calc_point(i,j,psi,psiR,psiZ,dR,dZ):
@@ -350,30 +343,33 @@ class NKGSsolver(eqx.Module):
             and 0 outside plasma domain.
         """
 
-        mask=jnp.zeros(psi.shape)
+        # mask=jnp.zeros(psi.shape)
 
-        Ro, Zo, psio = opoint[0]
-        Rx, Zx, psix = xpoint[0]
+        # Ro, Zo, psio = opoint[0]
+        # Rx, Zx, psix = xpoint[0]
 
-        # Normalise psi
-        psin = (psi - psio) / (psix - psio)
+        # # Normalise psi
+        # psin = (psi - psio) / (psix - psio)
 
-        # Condition that 0 < psin < 1
-        s1=(psin>=0)*(psin<=1)
+        # # Condition that 0 < psin < 1
+        # s1=(psin>=0)*(psin<=1)
 
-        # Condition that (R-Rx)*(R0-Rx) + (Z-Zx)*(Z0-ZX) > 0
-        m2=(self.R-Rx)*(Ro-Rx) + (self.Z-Zx)*(Zo-Zx)
-        s2=(m2>0)
+        # # Condition that (R-Rx)*(R0-Rx) + (Z-Zx)*(Z0-ZX) > 0
+        # m2=(self.R-Rx)*(Ro-Rx) + (self.Z-Zx)*(Zo-Zx)
+        # s2=(m2>0)
 
-        m3=(self.R-xpoint[1,0])*(Ro-xpoint[1,0]) + (self.Z-xpoint[1,1])*(Zo-xpoint[1,1])
-        s3=(m3>0)
+        # m3=(self.R-xpoint[1,0])*(Ro-xpoint[1,0]) + (self.Z-xpoint[1,1])*(Zo-xpoint[1,1])
+        # s3=(m3>0)
 
-        mask=s1*s2*s3
+        # mask=s1*s2*s3
+
+        mask = full_mask.inside_mask(self.R, self.Z,
+                                   psi, opoint, xpoint)
 
         return mask
 
     @jax.jit
-    def jtor(self, profilePars, psi):
+    def jtor(self, profilePars, psi, check_limited=True):
         """
         Calculate the toroidal plasma current 
 
@@ -393,9 +389,28 @@ class NKGSsolver(eqx.Module):
         opts, xpts = self.critpoints(psi)
         diverted_mask = self.mask(psi, opts, xpts)
         psib = xpts[0,2]
-        psi_bound, limiter_mask = self.limiter.core_mask_limiter(self.R, self.Z, psi, psib, diverted_mask, self.limiter.limiter_mask_out)
+
+        if (check_limited):
+            dmask_inside_limiter = diverted_mask*self.limiter.mask_inside_limiter 
+            psi_bound, limiter_mask = self.limiter.core_mask_limiter(
+                                        self.R, self.Z, 
+                                        psi, psib, 
+                                        dmask_inside_limiter, 
+                                        self.limiter.limiter_mask_out)
+            lmask_sum = jnp.sum(limiter_mask * self.limiter.mask_inside_limiter)
+
+            # Quantities to calculate Jtor inside plasma core
+            plasma_domain_mask = jnp.where(lmask_sum==0,
+                                    dmask_inside_limiter,
+                                    limiter_mask)
+            psi_bndry = jnp.where(lmask_sum==0,psib,psi_bound)
+        else:
+            plasma_domain_mask = diverted_mask
+            psi_bndry = psib
+
         psi_axis = opts[0,2]
-        jtor = self.profile.jtor(self, profilePars, psi, psi_axis, psi_bound, limiter_mask)
+        jtor = self.profile.jtor(self, profilePars, psi, 
+                    psi_axis, psi_bndry, plasma_domain_mask)
 
         return jtor
 
@@ -427,26 +442,26 @@ class NKGSsolver(eqx.Module):
         def _psibound(x,y):
             greenfunc = Greens(self.R, self.Z, self.R[x, y], self.Z[x, y])
             # Prevent infinity/nan by removing (x,y) point
-            greenfunc = greenfunc.at[x, y].set(zeroprec)
+            greenfunc = greenfunc.at[x, y].set(0.0)
             # Integrate over the domain
             psival = jnp.sum(jnp.sum(greenfunc * jtor))
 
             return psival
 
-        _psibound_vmap=jax.jit(jax.vmap(_psibound,in_axes=(0,0)))
+        _psibound_vmap=jax.vmap(_psibound,in_axes=(0,0))
         
         #calculates and assignes boundary conditions
         psi_boundary = jnp.zeros_like(self.R)
-        if self.greenfunc is None:
+        if self.bndry_green is None:
             # calculate greenfunctions on-the-fly using vmapped function
-            xb, yb = self.bndry_indices[:,0], self.bndry_indices[:,0]
+            xb, yb = self.bndry_indices[:,0], self.bndry_indices[:,1]
             psi_bnd = _psibound_vmap(xb, yb)
             psi_boundary = psi_boundary.at[xb,yb].set(psi_bnd*self.dRdZ)
         else:
             # weighted sum over the last two axes.
             # "contract" axis 1 of greenfunc with axis 0 of jtor
             # contract axis 2 of greenfunc with axis 1 of jtor
-            psi_bnd = jnp.tensordot(self.greenfunc, jtor, axes=([1, 2], [0, 1]))
+            psi_bnd = jnp.tensordot(self.bndry_green, jtor, axes=([1, 2], [0, 1]))
 
             psi_boundary=psi_boundary.at[:, 0].set(psi_bnd[:nx])
             psi_boundary=psi_boundary.at[:, -1].set(psi_bnd[nx:2*nx])
@@ -575,12 +590,12 @@ class NKGSsolver(eqx.Module):
         target_relative_tolerance,
         use_newton=False,
         lag_Jacobian=1, 
-        max_solving_iterations=50,
-        Picard_handover=0.15,
+        max_solving_iterations=100,
+        Picard_handover=0.11,
         step_size=2.5,
         scaling_with_n=-1.0,
         target_relative_unexplained_residual=0.2,  
-        max_n_directions=8,
+        max_n_directions=16,
         clip=10,
         verbose=False,
         max_rel_update_size=0.2,
@@ -631,7 +646,7 @@ class NKGSsolver(eqx.Module):
         """
         
         nx,ny=init_psi.shape
-        tokamak_psi = jnp.dot(currentvec,self.pgreen)
+        tokamak_psi = jnp.dot(currentvec,self.coil_green)
         trial_plasma_psi = jnp.asarray(init_psi).reshape(-1) - tokamak_psi
 
         # update solution
@@ -704,7 +719,7 @@ def _nksolve(solver,
     picard_flag = 0
     nx,ny = solver.R.shape
 
-    log.append(f"Initial relative error = {rel_change:.2e}")
+    log.append("Initial relative error ="+str(rel_change))
     if verbose:
         for x in log:
             print(x)
@@ -729,14 +744,17 @@ def _nksolve(solver,
             log.append("-----")
             log.append("Picard iteration: " + str(iter))
             # using Picard instead of NK
-            # make picard update to the flux up-down symmetric
-            # this combats the instability of picard iterations
-            res0_2d = res0.reshape(nx,ny)
-            update_sym = -0.5 * (res0_2d + res0_2d[:, ::-1]).reshape(-1)
-            update_nonsym = -1.0 * res0
-            alpha = jnp.array((picard_flag < 3)).astype('float32')
-            update = alpha*update_sym + (1-alpha)*update_nonsym
-            picard_flag  = picard_flag + 1
+            if picard_flag < min(max_solving_iterations - 1, 3):
+                    # make picard update to the flux up-down symmetric
+                    # this combats the instability of picard iterations
+                    res0_2d = res0.reshape(nx, ny)
+                    res0 = 0.5 * (res0_2d + res0_2d[:, ::-1]).reshape(-1)
+                    picard_flag += 1
+            else:
+                    # update = -1.0 * res0
+                    picard_flag = 1
+            update = -1.0 * res0
+            Abasis = (trial_plasma_psi, None, None)
         else:
             log.append("-----")
             log.append("Newton-Krylov iteration: " + str(iter))
@@ -757,15 +775,33 @@ def _nksolve(solver,
         if del_update / del_psi > max_rel_update_size:
             # Reduce the size of the update as found too large
             update *= jnp.abs(max_rel_update_size * del_psi / del_update)
+            log.append("Update too large, resized.")
         
+        update0 = update
+        check_resid = True
+        while (check_resid):
+            new_trial_plasma_psi = trial_plasma_psi + update
+            new_res0 = solver.F_function(new_trial_plasma_psi, tokamak_psi, profilePars)
+            new_norm_rel_change = solver.relative_norm_residual(
+                        new_res0, new_trial_plasma_psi
+                    )
+            nan_resid = jnp.isnan(new_norm_rel_change)
+            norm_increase = (new_norm_rel_change > 1.2 * history_norm_rel_change[-1])
+            check_resid = jnp.logical_or(nan_resid,norm_increase)
+            if (check_resid):
+                log.append(
+                        "Update resizing triggered due to residual increase or NaN..."
+                    )
+                update = update*0.75
+
         trial_plasma_psi = trial_plasma_psi + update
         res0 = solver.F_function(trial_plasma_psi, tokamak_psi, profilePars)
-        starting_direction = res0
         norm_rel_change = solver.relative_norm_residual(res0, trial_plasma_psi)
         rel_change, del_psi = solver.relative_del_residual(res0, trial_plasma_psi)
+        starting_direction = res0
         relative_change = 1.0 * rel_change
         history_norm_rel_change.append(norm_rel_change)
-        log.append(f"...relative error =  {rel_change:.2e}")
+        log.append("...relative error ="+str(rel_change))
         log.append("-----")
         if verbose:
             for x in log:
@@ -808,14 +844,14 @@ def _nksolve_jvp(solver, solver_params, primals, tangents):
         return dr
 
     def solve_with_gmres(A,b):
-        return jax.scipy.sparse.linalg.gmres(A,b,x0=b,restart=10,solve_method='incremental',atol=1e-6)[0]
+        return jax.scipy.sparse.linalg.gmres(A,b,x0=b,restart=10,solve_method='incremental',atol=1e-9)[0]
 
     res0, jvp_res0 = jax.jvp(Floc,(tokamak_psi, profilePars), (dtpsi, dprofile,))
     tangent_out = jax.lax.custom_linear_solve(dFfunc, -jvp_res0, solve=solve_with_gmres, transpose_solve=solve_with_gmres)
     
     primal_out = (opsi, Abasis)
 
-    return (primal_out, (tangent_out,(jnp.zeros_like(psi0), jnp.zeros_like(Gloc), jnp.zeros_like(Qloc))) )
+    return (primal_out, (tangent_out,(jnp.zeros_like(opsi), jnp.zeros_like(Gloc), jnp.zeros_like(Qloc))) )
 
 @partial(jax.custom_jvp,nondiff_argnums=(0,1))
 def _nsolve(solver,
@@ -926,7 +962,7 @@ def Greens(Rc, Zc, R, Z):
     k2 = 4.0 * R * Rc / ((R + Rc) ** 2 + (Z - Zc) ** 2)
 
     # Clip to between 0 and 1 to avoid nans e.g. when coil is on grid point
-    k2 = jnp.clip(k2, 2e-7, 1.0 - 2e-7)
+    k2 = jnp.clip(k2, 1e-10, 1.0 - 1e-10)
     k = jnp.sqrt(k2)
 
     # Note definition of ellipk, ellipe in scipy is K(k^2), E(k^2)

@@ -31,6 +31,7 @@ class Limiter_handler(eqx.Module):
 
     mask_inside_limiter: jax.Array
     limiter_mask_out: jax.Array
+    mask_limiter_cells: jax.Array
     fine_point: jax.Array
     # fine_point_per_cell: dict
     # fine_point_per_cell_R: dict
@@ -212,7 +213,7 @@ class Limiter_handler(eqx.Module):
         layer_mask = layer_mask * np.logical_not(mask)
         return layer_mask.astype(bool)
 
-    def limiter_points(self, eqR, eqZ, limiter, refine=6):
+    def limiter_points(self, eqR, eqZ, limiter, refine=16):
         """Based on the limiter vertices, it builds the refined list of points on the boundary
         of the region where the plasma is allowed. These refined boundary points are those on which the flux
         function is interpolated to find the value of psi_boundary in the case of a limiter plasma.
@@ -223,6 +224,10 @@ class Limiter_handler(eqx.Module):
             the upsampling ratio with respect to the solver's grid, by default 6.
 
         """
+
+        eqR_1D = eqR[:, 0]
+        eqZ_1D = eqZ[0, :]
+
         verts = np.concatenate(
             (
                 np.array(limiter.R)[:, np.newaxis],
@@ -230,25 +235,85 @@ class Limiter_handler(eqx.Module):
             ),
             axis=-1,
         )
+        dverts = verts[1:] - verts[:-1]
+        idxR = (
+            np.sum(
+                np.tile(eqR_1D[np.newaxis], (len(verts), 1)) < verts[:, :1], axis=1
+            )
+            - 1
+        )
+        idxZ = (
+            np.sum(
+                np.tile(eqZ_1D[np.newaxis], (len(verts), 1)) < verts[:, 1:], axis=1
+            )
+            - 1
+        )
 
-        dR = eqR[1,0]-eqR[0,0]
-        dZ = eqZ[0,1]-eqZ[0,0]
+        all_fine_verts = []
+        for i in range(len(verts) - 1):
 
-        refined_ddiag = (dR**2 + dZ**2) ** 0.5 / refine
+            if dverts[i, 0] == 0:
+                # line is vertical
+                # line can only intersect the horizontal grid
+                min_Z = min(idxZ[i : i + 2])
+                max_Z = max(idxZ[i : i + 2])
+                Zvals = eqZ_1D[min_Z + 1 : max_Z + 1]
+                Rvals = np.array([verts[i, 0]] * len(Zvals))
+                fine_verts = np.array([Rvals, Zvals]).T
 
-        fine_points = []
-        for i in range(1, len(verts)):
-            dv = verts[i : i + 1] - verts[i - 1 : i]
-            ndv = np.linalg.norm(dv)
-            nn = np.round(ndv // refined_ddiag).astype(int)
-            if nn:
-                points = dv * np.arange(nn)[:, np.newaxis] / nn
-                points += verts[i - 1 : i]
-                fine_points.append(points)
-        fine_points = np.concatenate(fine_points, axis=0)
-        self.fine_point = jnp.array(fine_points)
+            elif dverts[i, 1] == 0:
+                # line is horizontal
+                # line can only intersect the vertical grid
+                min_R = min(idxR[i : i + 2])
+                max_R = max(idxR[i : i + 2])
+                Rvals = eqR_1D[min_R + 1 : max_R + 1]
+                Zvals = np.array([verts[i, 1]] * len(Rvals))
+                fine_verts = np.array([Rvals, Zvals]).T
 
-        # finds the grid vertex with coords just below each of the fine_points along the limiter
+            else:
+                # not vertical
+                aa = dverts[i, 1] / dverts[i, 0]
+                bb = verts[i, 1] - aa * verts[i, 0]
+
+                # add all intersections with the vertical grid
+                min_R = min(idxR[i : i + 2])
+                max_R = max(idxR[i : i + 2])
+                Rvals = eqR_1D[min_R + 1 : max_R + 1]
+                Zvals = aa * Rvals + bb
+                fine_verts = np.array([Rvals, Zvals]).T
+                # add all intersections with the horizontal grid
+                min_Z = min(idxZ[i : i + 2])
+                max_Z = max(idxZ[i : i + 2])
+                Zvals = eqZ_1D[min_Z + 1 : max_Z + 1]
+                Rvals = (Zvals - bb) / aa
+                fine_verts = np.concatenate(
+                    (fine_verts, np.array([Rvals, Zvals]).T), axis=0
+                )
+
+            # add second vertex
+            fine_verts = np.concatenate((fine_verts, verts[i + 1 : i + 2]), axis=0)
+            # sort locally
+            fine_verts = fine_verts[
+                np.argsort(np.linalg.norm(fine_verts - verts[i + 1 : i + 2], axis=1))
+            ]
+
+            all_fine_verts.append(fine_verts)
+
+        fine_points = np.concatenate(all_fine_verts, axis=0)
+
+        # refined_ddiag = (self.dR**2 + self.dZ**2) ** 0.5 / refine
+        # fine_points = []
+        # for i in range(1, len(verts)):
+        #     dv = verts[i : i + 1] - verts[i - 1 : i]
+        #     ndv = np.linalg.norm(dv)
+        #     nn = np.round(ndv // refined_ddiag).astype(int)
+        #     if nn:
+        #         points = dv * np.arange(nn)[:, np.newaxis] / nn
+        #         points += verts[i - 1 : i]
+        #         fine_points.append(points)
+        # fine_points = np.concatenate(fine_points, axis=0)
+
+        # finds the grid vertex with coords just left-below each of the fine_points along the limiter
         Rvals = eqR[:, 0]
         Ridxs = np.sum(Rvals[np.newaxis, :] < fine_points[:, :1], axis=1) - 1
         Zvals = eqZ[0, :]
@@ -256,11 +321,18 @@ class Limiter_handler(eqx.Module):
         grid_per_limiter_fine_point = np.concatenate(
             (Ridxs[:, np.newaxis], Zidxs[:, np.newaxis]), axis=-1
         )
-        mask_inside_limiter=np.array(self.mask_inside_limiter)
-        limiter_mask_out = self.make_layer_mask(
-            np.logical_not(mask_inside_limiter), 1
-        )
-        self.limiter_mask_out = jnp.asarray(limiter_mask_out)
+        # saves the mask of all gridpoints that are just left-below any limiter fine-point
+        mask_limiter_cells = np.zeros_like(eqR)
+        mask_limiter_cells[
+            grid_per_limiter_fine_point[:, 0],
+            grid_per_limiter_fine_point[:, 1],
+        ] = 1
+        self.mask_limiter_cells = jnp.asarray(mask_limiter_cells.astype(bool))
+
+        self.limiter_mask_out = jnp.asarray(self.make_layer_mask(
+            np.logical_not(self.mask_inside_limiter), 1
+        ))
+        # self.offending_mask = np.zeros_like(eqR).astype(bool)
 
         fine_point_per_cell = {}
         fine_point_per_cell_R = {}
@@ -286,13 +358,9 @@ class Limiter_handler(eqx.Module):
                 ]
             )
         for key in fine_point_per_cell.keys():
-            fine_point_per_cell[key] = jnp.array(fine_point_per_cell[key],dtype='int32')
-            fine_point_per_cell_R[key] = jnp.array(fine_point_per_cell_R[key])
-            fine_point_per_cell_Z[key] = jnp.array(fine_point_per_cell_Z[key])
-        
-        # self.fine_point_per_cell = fine_point_per_cell
-        # self.fine_point_per_cell_R = fine_point_per_cell_R
-        # self.fine_point_per_cell_Z = fine_point_per_cell_Z
+            fine_point_per_cell_R[key] = np.array(fine_point_per_cell_R[key])
+            fine_point_per_cell_Z[key] = np.array(fine_point_per_cell_Z[key])
+        self.fine_point = jnp.asarray(fine_points)
 
     # def interp_on_limiter_points_cell(self, id_R, id_Z, psi):
     #     """Calculates a bilinear interpolation of the flux function psi in the solver's grid
@@ -403,14 +471,20 @@ class Limiter_handler(eqx.Module):
             Flag to identify if the plasma is in a diverted or limiter configuration.
 
         """
+        core_mask = core_mask.astype(float)
+        # identify the grid points just left-below of points on the limiter that need checking
+        offending_mask1 = (
+            core_mask[:-1, :-1]
+            + core_mask[1:, :-1]
+            + core_mask[:-1, 1:]
+            + core_mask[1:, 1:]
+        )
+        offending_mask1 = (offending_mask1 > 0) * (offending_mask1 < 4)
+        offending_mask = jnp.zeros_like(psi).astype(bool)
+        offending_mask = offending_mask.at[:-1, :-1].set(offending_mask1)
+        offending_mask *= self.mask_limiter_cells
 
-        offending_mask = (core_mask * limiter_mask_out).astype(bool)
         nx,ny = psi.shape
-        # if jnp.any(offending_mask):
-            # psi_max_out = np.amax(psi[offending_mask])
-            # psi_max_in = np.amax(psi[(core_mask * limiter_mask_in).astype(bool)])
-            # psi_bndry = linear_coeff*psi_max_out + (1-linear_coeff)*psi_max_in
-            # core_mask = (psi > psi_bndry)*core_mask
 
         id_psi_max_out = jnp.unravel_index(
             jnp.argmax(psi - (10**6) * (1 - offending_mask)), (nx, ny)
@@ -434,8 +508,8 @@ class Limiter_handler(eqx.Module):
         psi_divert = psi_bndry
         psi_bndry = jnp.maximum(psi_on_limiter, psi_divert)
         limiter_mask = jnp.where(psi_on_limiter > psi_divert,
-                                (psi > psi_bndry)*self.mask_inside_limiter*core_mask, 
-                                self.mask_inside_limiter * core_mask)
+                                (psi > psi_bndry)*core_mask, 
+                                core_mask)
 
         return psi_bndry, limiter_mask
 
