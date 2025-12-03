@@ -258,10 +258,10 @@ class NKGSsolver(eqx.Module):
             (A[1:-1,1:-1]<A[:-2,2:]) &
             (A[1:-1,1:-1]<A[:-2,:-2]),1,0))
 
-        ir, iz = jnp.nonzero(A2,size=200)
+        ir, iz = jnp.nonzero(A2,size=min(nx,ny)//2)
 
         @jax.jit
-        def _calc_point(i,j,psi,psiR,psiZ,dR,dZ):
+        def _calc_point(i,j):
             fR , fZ = psiR[i,j], psiZ[i,j]
             fRR = (psi[i+1,j]-2*psi[i,j]+psi[i-1,j])/dR**2
             fZZ = (psi[i,j+1]-2*psi[i,j]+psi[i,j-1])/dZ**2
@@ -272,9 +272,9 @@ class NKGSsolver(eqx.Module):
 
             return det, delta_R, delta_Z
 
-        _calc_point_vmap=jax.jit(jax.vmap(_calc_point,in_axes=(0,0,None,None,None,None,None)))
+        _calc_point_vmap=jax.vmap(_calc_point,in_axes=(0,0))
 
-        det, deltaR, deltaZ = _calc_point_vmap(ir,iz,psi,psiR,psiZ,dR,dZ)
+        det, deltaR, deltaZ = _calc_point_vmap(ir,iz)
         est_psi = psi[ir,iz]+0.5*(psiR[ir,iz]*deltaR + psiZ[ir,iz]*deltaZ)
         est_R, est_Z = self.R[ir,iz] + deltaR, self.Z[ir,iz] + deltaZ
         optmsk = jnp.where((jnp.abs(deltaR)<1.5*dR) & (jnp.abs(deltaZ)<1.5*dZ) & (det>0.0) & (ir>0),1,-1000)
@@ -291,12 +291,13 @@ class NKGSsolver(eqx.Module):
 
         opoints=opoints[isort,:]
 
-        def _check_xpoint(opt,fpsi,xpt):
-            [r0,z0,psi0]=opt
+        def _check_xpoint(xpt):
+            [r0,z0,psi0]=opoints[0,:]
             [rx,zx,psix]=xpt
-            rl=jnp.linspace(r0,rx,num=50)
-            zl=jnp.linspace(z0,zx,num=50)
-            psil=jnp.sign(psix-psi0)*fpsi(rl,zl)
+            rl=jnp.linspace(r0,rx,21)
+            zl=jnp.linspace(z0,zx,21)
+            fpsil=f_psi(rl,zl)
+            psil=jnp.sign(psix-psi0)*fpsil
             psimax=jnp.amax(psil)
             idmin = jnp.argmin(psil)
             xcheck = (psimax-psil[-1])/(psimax-psil[0])<0.001
@@ -305,8 +306,8 @@ class NKGSsolver(eqx.Module):
             return jnp.logical_and(xcheck,ocheck)
 
         # Check xpoints to ensure they are valid using monotinicity principle
-        _check_xpoint_vmap=(jax.vmap(_check_xpoint,in_axes=(None,None,0)))
-        xocheck = _check_xpoint_vmap(opoints[0,:],f_psi,xpoints)
+        _check_xpoint_vmap=jax.vmap(_check_xpoint)
+        xocheck = _check_xpoint_vmap(xpoints)
         xptfilt = jnp.where(xocheck,1,1000)
         xpoints = xpoints.at[:,2].set(xpoints[:,2]*xptfilt)
 
@@ -839,14 +840,16 @@ def _nksolve_jvp(solver, solver_params, primals, tangents):
     def Floc(t, p):
         return solver.F_function(psi0, t ,p)
 
-    def dFfunc(dx):
-        r, dr = jax.jvp(Ffunc, (psi0,), (dx,))
-        return dr
+    # def dFfunc(dx):
+    #     r, dr = jax.jvp(Ffunc, (psi0,), (dx,))
+    #     return dr
+    _, dFfunc = jax.linearize(Ffunc, psi0)
+    _, dFloc = jax.linearize(Floc,tokamak_psi,profilePars)
 
     def solve_with_gmres(A,b):
         return jax.scipy.sparse.linalg.gmres(A,b,x0=b,restart=10,solve_method='incremental',atol=1e-9)[0]
-
-    res0, jvp_res0 = jax.jvp(Floc,(tokamak_psi, profilePars), (dtpsi, dprofile,))
+    
+    jvp_res0 = dFloc(dtpsi, dprofile,)
     tangent_out = jax.lax.custom_linear_solve(dFfunc, -jvp_res0, solve=solve_with_gmres, transpose_solve=solve_with_gmres)
     
     primal_out = (opsi, Abasis)
