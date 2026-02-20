@@ -1,4 +1,5 @@
 import jax.numpy as np
+import jax
 
 """Implementation of Newton Krylow algorithm for solving
 a generic root problem of the type
@@ -9,7 +10,60 @@ Problem must be formulated so that x is a 1d np.array.
 In practice, given a guess x_0 and F(x_0) = R_0
 it aims to find the best step dx such that 
 F(x_0 + dx) is minimum.
-"""       
+"""
+
+# ---------------------
+# KERNEL A: stepping
+# ---------------------
+@jax.jit
+def compute_candidate_step(dx, step_size):
+	return step_size * dx / (np.linalg.norm(dx) + 1e-15)
+
+# ---------------------
+# KERNEL B: orthogonalization
+# ---------------------
+@jax.jit
+def orth_cgs(useful_residual, Qn_slice):
+	""" 
+	Orthogonalizes residual against the previous Krylov vectors
+	using a classical Gram-Schmidt orthogonalization.
+	"""
+
+	proj_coeffs = np.sum(Qn_slice * useful_residual[:, None], axis=0)
+	proj = (Qn_slice @ proj_coeffs)
+	return useful_residual - proj
+
+@jax.jit
+def orth_mgs(useful_residual, Qn, n_it):
+	""" 
+	Orthogonalizes residual against the previous Krylov vectors
+	using a Modified Gram-Schmidt orthogonalization.
+	"""
+	
+	# Orthogonalize against 
+	def body_fun(i, val):
+		q = Qn[:, i]
+		return val - np.dot(q, val) * q
+	
+	ortho_residual = jax.lax.fori_loop(0, n_it+1, body_fun, useful_residual)
+	
+	return ortho_residual
+
+# ---------------------
+# KERNEL C: least squares
+# ---------------------
+@jax.jit
+def solve_least_squares(Gloc, R0, clip):
+	coeffs, _, _, _ = np.linalg.lstsq(Gloc,-R0)
+	return np.clip(coeffs, -clip, clip)
+
+# ---------------------
+# KERNEL D: unexplained residual
+# ---------------------
+@jax.jit
+def compute_relative_unexplained(Gloc, coeffs, R0, nR0):
+	explained = Gloc @ coeffs
+	return np.linalg.norm(explained + R0) / nR0
 
 def Arnoldi_iteration(x0, #trial_current expansion point
 							dx, #first vector for current basis
@@ -81,10 +135,10 @@ def Arnoldi_iteration(x0, #trial_current expansion point
 	Gn = np.zeros((problem_dimension, max_n_directions+1))
 	
 	n_it = 0
-	n_it_tot = 0
 	adjusted_step_size = step_size*nR0
 
 	explore = 1
+
 	while explore:
 		this_step_size = adjusted_step_size*((1 + n_it)**scaling_with_n)
 		candidate_step = this_step_size*dx/np.linalg.norm(dx)
@@ -98,20 +152,24 @@ def Arnoldi_iteration(x0, #trial_current expansion point
 		G=G.at[:, n_it].set(useful_residual)
 		Gn=Gn.at[:, n_it].set(useful_residual / np.linalg.norm(useful_residual))
 
-		#orthogonalize with respect to previously attemped directions 
-		useful_residual -= np.sum(np.sum(Qn[:,:]*useful_residual[:,np.newaxis], axis=0, keepdims=True)*Qn[:,:], axis=1)
+		# Orthogonalize with jitted kernel
+		# useful_residual = orth_cgs(useful_residual,Qn[:, :])
+		useful_residual = orth_mgs(useful_residual, Qn[:, :], n_it)
 		dx = useful_residual
 
 		n_it += 1
-		Gloc = G[:,:n_it]
-		Qloc = Q[:,:n_it]
-		coeffs = np.matmul( np.matmul( np.linalg.inv( np.matmul(Gloc.T, Gloc)), Gloc.T), -R0)                            
-		coeffs = np.clip(coeffs, -clip, clip)
-		explained_residual = np.sum(Gloc*coeffs[np.newaxis,:], axis=1) 
-		relative_unexplained_residual = np.linalg.norm(explained_residual + R0)/nR0
-		explained_residual_check = (relative_unexplained_residual > target_relative_unexplained_residual)
-		explore = explained_residual_check
-		explore *= (n_it < max_n_directions)
+
+		Gloc = G[:, :n_it]
+		Qloc = Q[:, :n_it]
+
+		# Solve LS with jitted kernel
+		coeffs = solve_least_squares(Gloc, R0, clip)
+
+		# Compute unexplained residual with jitted kernel
+		relative_unexplained_residual = compute_relative_unexplained(Gloc, coeffs, R0, nR0)
+
+		explore = (relative_unexplained_residual > target_relative_unexplained_residual)
+		explore = explore and (n_it < max_n_directions)
 
 	best_dx = np.sum(Qloc*coeffs[np.newaxis,:], axis=1)
 

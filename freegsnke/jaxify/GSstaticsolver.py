@@ -708,9 +708,20 @@ def _nksolve(solver,
     max_n_directions,
     clip,
     verbose,
-    max_rel_update_size) = solver_params 
+    max_rel_update_size) = solver_params
 
-    res0 = solver.F_function(trial_plasma_psi, tokamak_psi, profilePars)
+    def Ffunc(x):
+        return solver.F_function(x, tokamak_psi, profilePars)
+    
+
+    # PICARD symmetry helper
+    nx, ny = solver.R.shape
+    def symmetrise_updown(v):
+        v2 = v.reshape(nx, ny)
+        return 0.5 * (v2 + v2[:, ::-1]).reshape(-1)
+
+
+    res0 = Ffunc(trial_plasma_psi)
     norm_rel_change = solver.relative_norm_residual(res0, trial_plasma_psi)
     rel_change, del_psi = solver.relative_del_residual(res0, trial_plasma_psi)
     relative_change = 1.0 * rel_change
@@ -726,13 +737,6 @@ def _nksolve(solver,
             print(x)
     
     iter = 0
-        
-    def Ffunc(x):
-        return solver.F_function(x, tokamak_psi, profilePars)
-
-    def dFfunc(x, dx):
-        r, dr = jax.jvp(Ffunc, (x,), (dx,))
-        return dr
 
     def condfun(rel_change, iter):
         return jnp.logical_and(
@@ -748,8 +752,7 @@ def _nksolve(solver,
             if picard_flag < min(max_solving_iterations - 1, 3):
                     # make picard update to the flux up-down symmetric
                     # this combats the instability of picard iterations
-                    res0_2d = res0.reshape(nx, ny)
-                    res0 = 0.5 * (res0_2d + res0_2d[:, ::-1]).reshape(-1)
+                    res0 = symmetrise_updown(res0)
                     picard_flag += 1
             else:
                     # update = -1.0 * res0
@@ -762,7 +765,7 @@ def _nksolve(solver,
             update, Abasis = nk_solver.Arnoldi_iteration(x0=trial_plasma_psi, #trial_current expansion point
                                                 dx=starting_direction, #first vector for current basis
                                                 R0=res0, #circuit eq. residual at trial_current expansion point: Fresidual(trial_current)
-                                                F_function=lambda u: Ffunc(u),
+                                                F_function=Ffunc,
                                                 step_size=step_size,
                                                 scaling_with_n=scaling_with_n,
                                                 target_relative_unexplained_residual=target_relative_unexplained_residual,  
@@ -778,11 +781,10 @@ def _nksolve(solver,
             update *= jnp.abs(max_rel_update_size * del_psi / del_update)
             log.append("Update too large, resized.")
         
-        update0 = update
         check_resid = True
         while (check_resid):
             new_trial_plasma_psi = trial_plasma_psi + update
-            new_res0 = solver.F_function(new_trial_plasma_psi, tokamak_psi, profilePars)
+            new_res0 = Ffunc(new_trial_plasma_psi)
             new_norm_rel_change = solver.relative_norm_residual(
                         new_res0, new_trial_plasma_psi
                     )
@@ -795,12 +797,11 @@ def _nksolve(solver,
                     )
                 update = update*0.75
 
-        trial_plasma_psi = trial_plasma_psi + update
-        res0 = solver.F_function(trial_plasma_psi, tokamak_psi, profilePars)
-        norm_rel_change = solver.relative_norm_residual(res0, trial_plasma_psi)
+        trial_plasma_psi = new_trial_plasma_psi
+        res0 = new_res0
+        norm_rel_change = new_norm_rel_change
         rel_change, del_psi = solver.relative_del_residual(res0, trial_plasma_psi)
         starting_direction = res0
-        relative_change = 1.0 * rel_change
         history_norm_rel_change.append(norm_rel_change)
         log.append("...relative error ="+str(rel_change))
         log.append("-----")
