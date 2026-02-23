@@ -11,6 +11,7 @@ from functools import partial
 import warnings
 from jax.experimental import sparse as jexsp
 from . import full_mask
+from . import dstsolver
 
 # Physical constants
 mu0 = 4e-7 * jnp.pi
@@ -31,7 +32,7 @@ class SparseLinearSolver(AbstractLinearSolver):
         return jexsp.linalg.spsolve(self.A.data,
                                     self.A.indices,
                                     self.A.indptr,
-                                    rhs)
+                                    rhs.reshape(-1))
 
 class DenseLinearSolver(AbstractLinearSolver):
 
@@ -39,7 +40,7 @@ class DenseLinearSolver(AbstractLinearSolver):
         super().__init__(A)
 
     def __call__(self, rhs):
-        return jnp.dot(self.A, rhs)
+        return jnp.dot(self.A, rhs.reshape(-1))
 
 class NKGSsolver(eqx.Module):
 
@@ -63,7 +64,7 @@ class NKGSsolver(eqx.Module):
     limiter: eqx.Module
     linear_GS_solver: eqx.Module
      
-    def __init__(self, eq, profile, limiter_func, use_sparse_solver=False, precompute_boundary_greens=True):
+    def __init__(self, eq, profile, limiter_func, linear_solver='dst', precompute_boundary_greens=True):
 
         """Instantiates the solver object.
         Based on the domain grid of the input equilibrium object, it prepares
@@ -116,10 +117,12 @@ class NKGSsolver(eqx.Module):
         #linear solver for del*Psi=RHS
         generator=freegs4e.gradshafranov.GSsparse4thOrder(eq.R[0,0],eq.R[-1,0],eq.Z[0,0],eq.Z[0,-1])
         
-        if (use_sparse_solver):
+        if (linear_solver=='sparse'):
             A = jexsp.BCSR.from_scipy_sparse(generator(nx,ny))
             self.linear_GS_solver = SparseLinearSolver(A)
-        else:
+        elif linear_solver=='dst':
+            self.linear_GS_solver = dstsolver.DSTSolver(R,Z)
+        elif linear_solver=='dense':
             A = jnp.linalg.inv(jexsp.BCSR.from_scipy_sparse(generator(nx,ny)).todense())
             self.linear_GS_solver = DenseLinearSolver(A)
         
@@ -542,7 +545,7 @@ class NKGSsolver(eqx.Module):
         """ 
         psi = plasma_psi + tokamak_psi
         rhs = self.freeboundary(profilePars, psi)
-        residual = plasma_psi - self.linear_GS_solver(rhs.reshape(-1))
+        residual = plasma_psi - self.linear_GS_solver(rhs)
 
         return residual
 
