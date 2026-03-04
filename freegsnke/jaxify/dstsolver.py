@@ -188,16 +188,44 @@ class DSTSolver(eqx.Module):
 
 	# -------------------------------
 	# DST-I implementation (orthonormal, self-inverse per your check)
+	# @jax.jit
+	# def dstI1D(self, x, norm="ortho"):
+	# 	"""1D type-I discrete sine transform along the last axis."""
+	# 	num_dims = x.ndim
+	# 	N = x.shape
+	# 	padding = ((0, 0),) * (num_dims - 1) + ((1, 1),)
+	# 	x = jnp.pad(x, pad_width=padding, mode="constant", constant_values=0.0)
+	# 	x = jnp.fft.irfft(-1j * x, axis=-1, norm=norm)
+	# 	x = jax.lax.slice_in_dim(x, 1, N[-1] + 1, axis=-1)
+	# 	return x
+
 	@jax.jit
-	def dstI1D(self, x, norm="ortho"):
-		"""1D type-I discrete sine transform along the last axis."""
-		num_dims = x.ndim
-		N = x.shape
-		padding = ((0, 0),) * (num_dims - 1) + ((1, 1),)
-		x = jnp.pad(x, pad_width=padding, mode="constant", constant_values=0.0)
-		x = jnp.fft.irfft(-1j * x, axis=-1, norm=norm)
-		x = jax.lax.slice_in_dim(x, 1, N[-1] + 1, axis=-1)
-		return x
+	def dstI1D(self, x):
+		"""
+		Orthonormal DST-I along the last axis using rFFT and odd extension.
+		Self-inverse: dstI1D_rfft(dstI1D_rfft(x)) == x (up to numerical error).
+
+		x: (..., N)
+		returns: (..., N)
+		"""
+		N = x.shape[-1]
+		# Odd extension: y = [0, x, 0, -x[::-1]]  -> length L = 2*(N+1)
+		y = jnp.concatenate(
+			[jnp.zeros_like(x[..., :1]), x, jnp.zeros_like(x[..., :1]), -x[..., ::-1]],
+			axis=-1
+		)
+
+		# Real FFT on the extended signal
+		Y = jnp.fft.rfft(y, axis=-1)  # default 'backward' norm
+
+		# DST-I coefficients are proportional to the imaginary part at bins 1..N
+		# For L = 2*(N+1), Im(Y[..., k]) = 2 * sum_n x_n * sin(pi*k*n/(N+1)), k=1..N
+		# Orthonormal scaling factor:
+		scale = 0.5 * jnp.sqrt(2.0 / (N + 1))
+
+		S = -jnp.imag(Y[..., 1:N+1]) * scale
+
+		return S
 
 	def init_matrix(self):
 		nr,nz = self.R.shape
@@ -238,10 +266,10 @@ class DSTSolver(eqx.Module):
 		has_gpu = any(d.platform == "gpu" for d in devices)
 
 		# Place arrays and select solver ONCE
-		if has_gpu:
-			self._solve_tridiag = tri_default
-		else:
-			self._solve_tridiag = thomas_solve_fused_batched  # differentiable CPU path
+		# if has_gpu:
+		# 	self._solve_tridiag = tri_default
+		# else:
+		self._solve_tridiag = thomas_solve_fused_batched 
 
 
 	@jax.jit
