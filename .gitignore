@@ -52,5 +52,5 @@ work/
 examples/.virtual_documents/*
 work/
 .virtual_documents/
-# Local Netlify folder
 .netlify
+.github/copilot-instructions.md
