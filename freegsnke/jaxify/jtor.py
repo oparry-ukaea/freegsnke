@@ -13,7 +13,7 @@ class JConstrainPaxisIp(eqx.Module):
 
     def __init__(self, paxis, Ip, fvac, alpha_m=1.0, alpha_n=2.0, Raxis=1.0):
 
-        self.init_params = (jnp.array(Ip),jnp.array([alpha_m, alpha_n, paxis]))
+        self.init_params = (jnp.array(Ip),jnp.array([alpha_m, alpha_n, paxis, Raxis]))
 
     @jax.jit    
     def jtor(self, solver, profilePars, psi, psia, psib, plasmadomain):
@@ -23,7 +23,7 @@ class JConstrainPaxisIp(eqx.Module):
         alpha_m=profilePars[1][0]
         alpha_n=profilePars[1][1]
         paxis=profilePars[1][2]
-        Raxis=1.0
+        Raxis=profilePars[1][3]
 
         # Normalised psi
         psi_norm = (psi - psia) / (psib - psia)
@@ -60,6 +60,38 @@ class JConstrainPaxisIp(eqx.Module):
                 + (1 - Beta0) * Raxis / solver.R) * jtorshape
 
         return Jtor
+
+class JFiesta_Topeol(eqx.Module):
+
+    init_params: jax.Array
+
+    def __init__(self, Beta0, Ip, fvac, alpha_m=1.0, alpha_n=2.0, Raxis=1.0):
+
+        self.init_params = (jnp.array(Ip),jnp.array([alpha_m, alpha_n, Beta0, Raxis]))
+
+    @jax.jit    
+    def jtor(self, solver, profilePars, psi, psia, psib, plasmadomain):
+
+        # Extract profile information
+        Ip=profilePars[0]
+        alpha_m=profilePars[1][0]
+        alpha_n=profilePars[1][1]
+        Beta0=profilePars[1][2]
+        Raxis=profilePars[1][3]
+
+        # Normalised psi
+        psi_norm = (psi - psia) / (psib - psia)
+
+        # Current profile shape
+        jtorshape = (1.0 - jnp.clip(psi_norm, 0.0, 1.0) ** alpha_m) ** alpha_n
+        jtorshape = jtorshape * plasmadomain
+
+        # Toroidal current
+        Jtor = (Beta0 * solver.R / Raxis 
+                + (1 - Beta0) * Raxis / solver.R) * jtorshape
+        L = Ip / jnp.maximum(jnp.sum(Jtor)*solver.dRdZ, 1e-9)
+
+        return L*Jtor
 
 class JLao85(eqx.Module):
 
@@ -108,7 +140,7 @@ class JLao85(eqx.Module):
         )
         pprime_term *= alpha[:, jnp.newaxis, jnp.newaxis]
         pprime_term = jnp.sum(pprime_term, axis=0)
-        pprime_term *= solver.R / Raxis
+        pprime_term *= solver.R
 
         ffprime_term = (
             psi_norm[jnp.newaxis, :, :]
@@ -116,7 +148,7 @@ class JLao85(eqx.Module):
         )
         ffprime_term *= beta[:, jnp.newaxis, jnp.newaxis]
         ffprime_term = jnp.sum(ffprime_term, axis=0)
-        ffprime_term *= Raxis / solver.R
+        ffprime_term /= solver.R
         ffprime_term /= mu0
 
         # sum together
@@ -134,4 +166,52 @@ class JLao85(eqx.Module):
         L = jnp.where(self.Ip_logic,Ip/(jtorIp*solver.dRdZ),1.0)
         Jtor = L * Jtor
 
+        return Jtor
+    
+class JPprimeFFprime(eqx.Module):
+
+    init_params: jax.Array
+
+    def __init__(self, Ip, pprime_data, ffprime_data):
+
+        npoints = pprime_data.shape[0]
+        psin = jnp.linspace(0,1,npoints)
+        self.init_params = (jnp.array(Ip),(psin, jnp.array(pprime_data), 
+                                                 jnp.array(ffprime_data)))
+
+    @jax.jit    
+    def jtor(self, solver, profilePars, psi, psia, psib, plasmadomain):
+
+        # Extract profile information
+        Ip=profilePars[0]
+        psin=profilePars[1][0]
+        pprime=profilePars[1][1]
+        ffprime=profilePars[1][2]
+
+        # Normalised psi
+        psi_norm = (psi - psia) / (psib - psia)
+
+        # calculate normalised psi
+        psi_norm = jnp.clip(psi_norm, 0.0, 1.0)
+
+        # calculate the p' and FF' profiles
+        pprime_term = jnp.interp(psi_norm, psin, pprime)
+
+        ffprime_term = jnp.interp(psi_norm, psin, ffprime)
+
+        # sum together
+        Jtor = solver.R*pprime_term + (1.0/solver.R/mu0)*ffprime_term
+
+        # put to zero all current outside the LCFS
+        Jtor *= psi > psib
+
+        Jtor *= Ip * Jtor > 0
+
+        Jtor *= plasmadomain
+
+        # if Ip normalisation is required, do it
+        jtorIp = jnp.sum(Jtor)
+        L = jnp.where(self.Ip_logic,Ip/(jtorIp*solver.dRdZ),1.0)
+        Jtor = L * Jtor
+        
         return Jtor
