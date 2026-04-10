@@ -965,11 +965,15 @@ def Greens(Rc, Zc, R, Z):
 
     """
 
+    # Detect the precision of the input
+    dtype = R.dtype
+    eps = jnp.finfo(dtype).eps * 10.0  # Use a small multiple of the machine limit
+
     # Calculate k^2
     k2 = 4.0 * R * Rc / ((R + Rc) ** 2 + (Z - Zc) ** 2)
 
     # Clip to between 0 and 1 to avoid nans e.g. when coil is on grid point
-    k2 = jnp.clip(k2, 1e-10, 1.0 - 1e-10)
+    k2 = jnp.clip(k2, eps, 1.0 - eps)
     k = jnp.sqrt(k2)
 
     # Note definition of ellipk, ellipe in scipy is K(k^2), E(k^2)
