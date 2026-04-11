@@ -105,7 +105,6 @@ class JLao85(eqx.Module):
         beta,
         alpha_logic=True,
         beta_logic=True,
-        Raxis=1.0,
         Ip_logic=True,
     ):
 
@@ -125,7 +124,6 @@ class JLao85(eqx.Module):
 
         # Extract profile information
         (Ip, alpha, beta) = profilePars
-        Raxis=1.0
         alpha_exp = jnp.arange(0,len(alpha))
         beta_exp = jnp.arange(0,len(beta))
 
@@ -171,13 +169,16 @@ class JLao85(eqx.Module):
 class JPprimeFFprime(eqx.Module):
 
     init_params: jax.Array
+    Ip_logic: bool
 
-    def __init__(self, Ip, pprime_data, ffprime_data):
+    def __init__(self, Ip, pprime_data, ffprime_data, Ip_logic=True):
 
         npoints = pprime_data.shape[0]
         psin = jnp.linspace(0,1,npoints)
         self.init_params = (jnp.array(Ip),(psin, jnp.array(pprime_data), 
                                                  jnp.array(ffprime_data)))
+        
+        self.Ip_logic = Ip_logic
 
     @jax.jit    
     def jtor(self, solver, profilePars, psi, psia, psib, plasmadomain):
@@ -203,10 +204,6 @@ class JPprimeFFprime(eqx.Module):
         Jtor = solver.R*pprime_term + (1.0/solver.R/mu0)*ffprime_term
 
         # put to zero all current outside the LCFS
-        Jtor *= psi > psib
-
-        Jtor *= Ip * Jtor > 0
-
         Jtor *= plasmadomain
 
         # if Ip normalisation is required, do it
