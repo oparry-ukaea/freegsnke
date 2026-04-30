@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import freegs4e
 from . import nk_solver
 import interpax as ix
+import lineax as lx
 import jax.scipy as jsp
 import equinox as eqx
 from timeit import default_timer as timer
@@ -16,17 +17,11 @@ from . import dstsolver
 # Physical constants
 mu0 = 4e-7 * jnp.pi
 
-class AbstractLinearSolver(eqx.Module):
+class SparseLUSolver(eqx.Module):
     A: jax.Array
 
     def __init__(self, A):
         self.A = A
-
-
-class SparseLinearSolver(AbstractLinearSolver):
-
-    def __init__(self, A):
-        super().__init__(A)
         
     def __call__(self, rhs):
         return jexsp.linalg.spsolve(self.A.data,
@@ -34,13 +29,20 @@ class SparseLinearSolver(AbstractLinearSolver):
                                     self.A.indptr,
                                     rhs.reshape(-1))
 
-class DenseLinearSolver(AbstractLinearSolver):
+class KrylovSolver(eqx.Module):
+    solver: lx.GMRES = eqx.field(static=True)
 
-    def __init__(self, A):
-        super().__init__(A)
+    def __init__(self, tol):
+        self.solver = lx.GMRES(atol=tol,rtol=tol,restart=10)
 
-    def __call__(self, rhs):
-        return jnp.dot(self.A, rhs.reshape(-1))
+    def __call__(self, A, b):
+        operator = lx.FunctionLinearOperator(A, b)
+        solution = lx.linear_solve(
+            operator,
+            b,
+            solver=self.solver
+        )
+        return solution.value
 
 class NKGSsolver(eqx.Module):
 
@@ -63,6 +65,7 @@ class NKGSsolver(eqx.Module):
     profile: eqx.Module
     limiter: eqx.Module
     linear_GS_solver: eqx.Module
+    krylov_solver: eqx.Module
      
     def __init__(self, eq, profile, limiter_func, linear_solver='dst', precompute_boundary_greens=True):
 
@@ -117,14 +120,13 @@ class NKGSsolver(eqx.Module):
         #linear solver for del*Psi=RHS
         generator=freegs4e.gradshafranov.GSsparse4thOrder(eq.R[0,0],eq.R[-1,0],eq.Z[0,0],eq.Z[0,-1])
         
-        if (linear_solver=='sparse'):
+        if (linear_solver=='sparse-lu'):
             A = jexsp.BCSR.from_scipy_sparse(generator(nx,ny))
-            self.linear_GS_solver = SparseLinearSolver(A)
+            self.linear_GS_solver = SparseLUSolver(A)
         elif linear_solver=='dst':
             self.linear_GS_solver = dstsolver.DSTSolver(R,Z)
-        elif linear_solver=='dense':
-            A = jnp.linalg.inv(jexsp.BCSR.from_scipy_sparse(generator(nx,ny)).todense())
-            self.linear_GS_solver = DenseLinearSolver(A)
+        else :
+            raise ValueError(f"Solver type {linear_solver} not recognized")
         
         # List of indices on the boundary
         bndry_indices = np.concatenate(
@@ -153,12 +155,14 @@ class NKGSsolver(eqx.Module):
         self.profile = profile
         self.limiter = limiter_func
 
+        self.krylov_solver=KrylovSolver(tol=1e-12)
+
         # Test run
         init_params=profile.init_params
-        ppsi=eq.plasma_psi.reshape(-1)
-        tpsi=eq.tokamak.getPsitokamak(vgreen=eq._vgreen).reshape(-1)
+        ppsi=jnp.asarray(eq.plasma_psi.reshape(-1))
+        tpsi=jnp.asarray(eq.tokamak.getPsitokamak(vgreen=eq._vgreen).reshape(-1))
         self.F_function(ppsi,tpsi,init_params)
-        self.F_function2(ppsi,tpsi,init_params)
+        # self.F_function2(ppsi,tpsi,init_params)
         # zeromach = jnp.asarray(jnp.pi)
 		# while (1.0+zeromach/2.0 > 1.0):
 		# 	zeromach = zeromach/2.0
@@ -441,7 +445,6 @@ class NKGSsolver(eqx.Module):
         ppsi = psi.reshape(nx,ny)
         jtor = self.jtor(profilePars, ppsi)    
         rhs = -mu0*self.R*jtor
-        zeroprec = self.R[0,0]-self.R[0,0]
 
         def _psibound(x,y):
             greenfunc = Greens(self.R, self.Z, self.R[x, y], self.Z[x, y])
@@ -592,7 +595,7 @@ class NKGSsolver(eqx.Module):
         profilePars,
         currentvec,
         target_relative_tolerance,
-        use_newton=False,
+        solver_type='newton-krylov',
         lag_Jacobian=1, 
         max_solving_iterations=100,
         Picard_handover=0.11,
@@ -654,7 +657,7 @@ class NKGSsolver(eqx.Module):
         trial_plasma_psi = jnp.asarray(init_psi).reshape(-1) - tokamak_psi
 
         # update solution
-        if (use_newton):
+        if (solver_type=='newton'):
             solver_params = (
                             target_relative_tolerance, 
                             max_solving_iterations,
@@ -662,13 +665,13 @@ class NKGSsolver(eqx.Module):
                             lag_Jacobian,
                             verbose,
                             )
-            plasma_psi, _ = _nsolve(self,
+            plasma_psi = _nsolve(self,
                             solver_params,
                             trial_plasma_psi,
                             tokamak_psi,
                             profilePars,
                             )
-        else:
+        elif solver_type == 'newton-krylov':
             solver_params = (
                             target_relative_tolerance, 
                             max_solving_iterations,
@@ -681,7 +684,22 @@ class NKGSsolver(eqx.Module):
                             verbose,
                             max_rel_update_size,
                             )
-            plasma_psi, _ = _nksolve(self,
+            plasma_psi = _nksolve(self,
+                            solver_params,
+                            trial_plasma_psi,
+                            tokamak_psi,
+                            profilePars,
+                            )
+        elif solver_type == 'jvp-newton-krylov':
+            solver_params = (
+                            target_relative_tolerance, 
+                            max_solving_iterations,
+                            Picard_handover,
+                            verbose,
+                            max_rel_update_size,
+                            )
+            
+            plasma_psi = _jnksolve(self,
                             solver_params,
                             trial_plasma_psi,
                             tokamak_psi,
@@ -815,7 +833,7 @@ def _nksolve(solver,
         log = []
         iter +=1
 
-    return (trial_plasma_psi, Abasis)
+    return trial_plasma_psi
 
 @_nksolve.defjvp
 def _nksolve_jvp(solver, solver_params, primals, tangents):
@@ -824,41 +842,34 @@ def _nksolve_jvp(solver, solver_params, primals, tangents):
     dppsi, dtpsi, dprofile, = tangents
 
     # Unpack solver parameters
-    (target_relative_tolerance, 
-    max_solving_iterations,
-    Picard_handover,
-    step_size,
-    scaling_with_n,
-    target_relative_unexplained_residual,  
-    max_n_directions,
-    clip,
-    verbose,
-    max_rel_update_size) = solver_params 
+    # (target_relative_tolerance, 
+    # max_solving_iterations,
+    # Picard_handover,
+    # step_size,
+    # scaling_with_n,
+    # target_relative_unexplained_residual,  
+    # max_n_directions,
+    # clip,
+    # verbose,
+    # max_rel_update_size) = solver_params 
 
-    opsi, Abasis = _nksolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
-    psi0, Gloc, Qloc = Abasis
+    opsi = _nksolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
 
     def Ffunc(x):
         return solver.F_function(x, tokamak_psi, profilePars)
 
     def Floc(t, p):
-        return solver.F_function(psi0, t ,p)
+        return solver.F_function(opsi, t ,p)
 
-    # def dFfunc(dx):
-    #     r, dr = jax.jvp(Ffunc, (psi0,), (dx,))
-    #     return dr
-    _, dFfunc = jax.linearize(Ffunc, psi0)
+    _, dFfunc = jax.linearize(Ffunc, opsi)
     _, dFloc = jax.linearize(Floc,tokamak_psi,profilePars)
-
-    def solve_with_gmres(A,b):
-        return jax.scipy.sparse.linalg.gmres(A,b,x0=b,restart=10,solve_method='incremental',atol=1e-9)[0]
     
     jvp_res0 = dFloc(dtpsi, dprofile,)
-    tangent_out = jax.lax.custom_linear_solve(dFfunc, -jvp_res0, solve=solve_with_gmres, transpose_solve=solve_with_gmres)
+    tangent_out = solver.krylov_solver(dFfunc,-jvp_res0)
     
-    primal_out = (opsi, Abasis)
+    primal_out = opsi
 
-    return (primal_out, (tangent_out,(jnp.zeros_like(opsi), jnp.zeros_like(Gloc), jnp.zeros_like(Qloc))) )
+    return (primal_out, tangent_out)
 
 @partial(jax.custom_jvp,nondiff_argnums=(0,1))
 def _nsolve(solver,
@@ -896,10 +907,6 @@ def _nsolve(solver,
     def Ffunc(x):
         return solver.F_function2(x, tokamak_psi, profilePars)
 
-    def dFfunc(x, dx):
-        r, dr = jax.jvp(Ffunc, (x,), (dx,))
-        return dr
-
     def condfun(rel_change, iter):
         return jnp.logical_and(
                     rel_change > target_relative_tolerance, 
@@ -934,7 +941,7 @@ def _nsolve(solver,
         log = []
         iter +=1
 
-    return (trial_plasma_psi, (psi0, Jmat))
+    return trial_plasma_psi
 
 @_nsolve.defjvp
 def _nsolve_jvp(solver, solver_params, primals, tangents):
@@ -942,20 +949,158 @@ def _nsolve_jvp(solver, solver_params, primals, tangents):
     trial_plasma_psi, tokamak_psi, profilePars, = primals
     dppsi, dtpsi, dprofile, = tangents
 
-    opsi, basis = _nsolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
-    psi0, Jmat = basis
+    opsi = _nsolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
 
     def Ffunc(x):
         return solver.F_function2(x, tokamak_psi, profilePars)
 
     def Floc(t, p):
-        return solver.F_function2(psi0, t ,p)
+        return solver.F_function2(opsi, t ,p)
 
     res0, jvp_res0 = jax.jvp(Floc,(tokamak_psi, profilePars), (dtpsi, dprofile,))
-    primal_out = (opsi, basis)
+    primal_out = opsi
+
+    Jmat = jax.jacfwd(Ffunc)(opsi)
     tangent_out = jnp.linalg.solve(Jmat, -jvp_res0)
 
-    return (primal_out, (tangent_out, (jnp.zeros_like(psi0), jnp.zeros_like(Jmat))))
+    return (primal_out, tangent_out)
+
+@partial(jax.custom_jvp, nondiff_argnums=(0,1))
+def _jnksolve(solver,
+            solver_params,
+            trial_plasma_psi,
+            tokamak_psi, 
+            profilePars, 
+            ):
+
+    trial_plasma_psi = jax.lax.stop_gradient(trial_plasma_psi)
+
+    # Unpack solver parameters
+    (target_relative_tolerance, 
+    max_solving_iterations,
+    Picard_handover,
+    verbose,
+    max_rel_update_size) = solver_params
+
+    def Ffunc(x):
+        return solver.F_function(x, tokamak_psi, profilePars)
+    
+
+    # PICARD symmetry helper
+    nx, ny = solver.R.shape
+    def symmetrise_updown(v):
+        v2 = v.reshape(nx, ny)
+        return 0.5 * (v2 + v2[:, ::-1]).reshape(-1)
+
+
+    res0, Jv = jax.linearize(Ffunc, trial_plasma_psi)
+    norm_rel_change = solver.relative_norm_residual(res0, trial_plasma_psi)
+    rel_change, del_psi = solver.relative_del_residual(res0, trial_plasma_psi)
+    relative_change = 1.0 * rel_change
+    history_norm_rel_change = [norm_rel_change]
+    starting_direction = res0
+    log = []
+    picard_flag = 0
+    nx,ny = solver.R.shape
+
+    log.append("Initial relative error ="+str(rel_change))
+    if verbose:
+        for x in log:
+            print(x)
+    
+    iter = 0
+
+    def condfun(rel_change, iter):
+        return jnp.logical_and(
+                    rel_change > target_relative_tolerance, 
+                    (iter < max_solving_iterations)
+                    )
+    rel_change = jnp.maximum(rel_change,2*target_relative_tolerance)
+    while (condfun(rel_change, iter)):
+        if rel_change > Picard_handover:
+            log.append("-----")
+            log.append("Picard iteration: " + str(iter))
+            # using Picard instead of NK
+            if picard_flag < min(max_solving_iterations - 1, 3):
+                    # make picard update to the flux up-down symmetric
+                    # this combats the instability of picard iterations
+                    res0 = symmetrise_updown(res0)
+                    picard_flag += 1
+            else:
+                    # update = -1.0 * res0
+                    picard_flag = 1
+            update = -1.0 * res0
+        else:
+            log.append("-----")
+            log.append("JVP-Newton-Krylov iteration: " + str(iter))
+            update = solver.krylov_solver(Jv, -res0)
+            # log.append(
+            #         f"...number of Krylov vectors used =  {(Abasis[1].shape[1])}"
+            #     )
+        del_update = jnp.amax(update) - jnp.amin(update)
+        if del_update / del_psi > max_rel_update_size:
+            # Reduce the size of the update as found too large
+            update *= jnp.abs(max_rel_update_size * del_psi / del_update)
+            log.append("Update too large, resized.")
+        
+        check_resid = True
+        while (check_resid):
+            new_trial_plasma_psi = trial_plasma_psi + update
+            new_res0, new_Jv = jax.linearize(Ffunc, new_trial_plasma_psi)
+            new_norm_rel_change = solver.relative_norm_residual(
+                        new_res0, new_trial_plasma_psi
+                    )
+            nan_resid = jnp.isnan(new_norm_rel_change)
+            norm_increase = (new_norm_rel_change > 1.2 * history_norm_rel_change[-1])
+            check_resid = jnp.logical_or(nan_resid,norm_increase)
+            if (check_resid):
+                log.append(
+                        "Update resizing triggered due to residual increase or NaN..."
+                    )
+                update = update*0.75
+
+        trial_plasma_psi = new_trial_plasma_psi
+        res0 = new_res0
+        Jv = new_Jv
+        norm_rel_change = new_norm_rel_change
+        rel_change, del_psi = solver.relative_del_residual(res0, trial_plasma_psi)
+        starting_direction = res0
+        history_norm_rel_change.append(norm_rel_change)
+        log.append("...relative error ="+str(rel_change))
+        log.append("...norm error ="+str(jnp.linalg.norm(update)))
+        log.append("-----")
+        if verbose:
+            for x in log:
+                print(x)
+
+        log = []
+        iter +=1
+
+    return trial_plasma_psi
+
+@_jnksolve.defjvp
+def _jnksolve_jvp(solver, solver_params, primals, tangents):
+
+    trial_plasma_psi, tokamak_psi, profilePars, = primals
+    dppsi, dtpsi, dprofile, = tangents
+
+    opsi = _jnksolve(solver, solver_params, trial_plasma_psi, tokamak_psi, profilePars)
+
+    def Floc(t, p):
+        return solver.F_function(opsi, t ,p)
+    
+    def Ffunc(x):
+        return solver.F_function(x, tokamak_psi ,profilePars)
+
+    _, dFfunc = jax.linearize(Ffunc,opsi)
+    _, dFloc = jax.linearize(Floc,tokamak_psi,profilePars)
+    
+    jvp_res0 = dFloc(dtpsi, dprofile,)
+    tangent_out = solver.krylov_solver(dFfunc, -jvp_res0)
+    
+    primal_out = opsi
+
+    return (primal_out, tangent_out)
 
 @jax.jit
 def Greens(Rc, Zc, R, Z):
