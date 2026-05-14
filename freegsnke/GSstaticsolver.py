@@ -154,7 +154,6 @@ class NKGSsolver:
         step = n_bndry_nodes // num_slices
 
         for i in range(num_slices):
-
             start = i * step
             end = start + step
             end = (
@@ -189,7 +188,6 @@ class NKGSsolver:
             psi_bnd = np.tensordot(self.greenfunc, self.jtor, axes=([1, 2], [0, 1]))
 
         else:
-
             bndry_indices = self.bndry_indices
             n_bndry_nodes = bndry_indices.shape[0]
 
@@ -201,7 +199,6 @@ class NKGSsolver:
             num_slices = 10
             step = n_bndry_nodes // num_slices
             for i in range(num_slices):
-
                 start = i * step
                 end = start + step
                 end = (
@@ -254,7 +251,6 @@ class NKGSsolver:
             self.linear_GS_solver = GSDSTSolver(self.R, self.Z, order=order)
 
         elif solver_type == "multigrid":
-
             if order is None:
                 order = 4
             if mg_kwargs is None:
@@ -558,10 +554,11 @@ class NKGSsolver:
                 # using Picard instead of NK
 
                 if picard_flag < min(max_solving_iterations - 1, 3):
-                    # make picard update to the flux up-down symmetric
-                    # this combats the instability of picard iterations
-                    res0_2d = res0.reshape(self.nx, self.ny)
-                    res0 = 0.5 * (res0_2d + res0_2d[:, ::-1]).reshape(-1)
+                    if force_up_down_symmetric:
+                        # make picard update to the flux up-down symmetric
+                        # this combats the instability of picard iterations
+                        res0_2d = res0.reshape(self.nx, self.ny)
+                        res0 = 0.5 * (res0_2d + res0_2d[:, ::-1]).reshape(-1)
                     picard_flag += 1
                 else:
                     # update = -1.0 * res0
