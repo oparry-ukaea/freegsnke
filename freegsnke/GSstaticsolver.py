@@ -154,7 +154,6 @@ class NKGSsolver:
         step = n_bndry_nodes // num_slices
 
         for i in range(num_slices):
-
             start = i * step
             end = start + step
             end = (
@@ -189,7 +188,6 @@ class NKGSsolver:
             psi_bnd = np.tensordot(self.greenfunc, self.jtor, axes=([1, 2], [0, 1]))
 
         else:
-
             bndry_indices = self.bndry_indices
             n_bndry_nodes = bndry_indices.shape[0]
 
@@ -201,7 +199,6 @@ class NKGSsolver:
             num_slices = 10
             step = n_bndry_nodes // num_slices
             for i in range(num_slices):
-
                 start = i * step
                 end = start + step
                 end = (
@@ -254,7 +251,6 @@ class NKGSsolver:
             self.linear_GS_solver = GSDSTSolver(self.R, self.Z, order=order)
 
         elif solver_type == "multigrid":
-
             if order is None:
                 order = 4
             if mg_kwargs is None:
@@ -411,6 +407,16 @@ class NKGSsolver:
         del_res = np.amax(res) - np.amin(res)
         return del_res / del_psi, del_psi
 
+    # Zweighted_Jtor(eq, profiles.jtor)
+    def Jtor_weighted_Z(self, eq, jtor):
+        return np.sum(jtor * eq.Z) / np.sum(jtor)
+
+    def calc_dZ_dIpr(self, profiles, eq, psi, Znow, dIpr):
+        # Recalculate Jtor with new (d)Ipr
+        psi_reshaped = psi.reshape(eq.nx, eq.ny)
+        jtor_new_Ipr = profiles.Jtor(eq.R, eq.Z, psi_reshaped + dIpr * eq._vgreen[7])
+        return (self.Jtor_weighted_Z(eq, jtor_new_Ipr) - Znow) / dIpr
+
     def forward_solve(
         self,
         eq,
@@ -550,6 +556,16 @@ class NKGSsolver:
         log = []
         log.append("-----")
         iterations = 0
+
+        # Original, fixed Ipr. want to get back to this by the end of the solve
+        Ipr_orig = eq.tokamak.getCurrents()["pr"]
+        # Presumably we're aiming for Z=0??
+        Ztarget = 0.0
+
+        delta_Ipr = 0.1
+        alpha = 1.0
+        Ipr_min_thresh = 1e-12
+        do_Ipr_updates = True
         while (rel_change > target_relative_tolerance) * (
             iterations < max_solving_iterations
         ):
@@ -558,10 +574,55 @@ class NKGSsolver:
                 # using Picard instead of NK
 
                 if picard_flag < min(max_solving_iterations - 1, 3):
-                    # make picard update to the flux up-down symmetric
-                    # this combats the instability of picard iterations
-                    res0_2d = res0.reshape(self.nx, self.ny)
-                    res0 = 0.5 * (res0_2d + res0_2d[:, ::-1]).reshape(-1)
+                    if do_Ipr_updates:
+                        Ipr_k = eq.tokamak.getCurrents()["pr"]
+                        Znow = self.Jtor_weighted_Z(eq, profiles.jtor)
+
+                        print(f"Ipr = {Ipr_k}; Znow = {Znow}")
+
+                        # Determine new Ipr
+                        delta_Ipr_prev = delta_Ipr
+                        dZ_dIpr = self.calc_dZ_dIpr(
+                            profiles, eq, trial_plasma_psi, Znow, delta_Ipr_prev
+                        )
+                        delta_Ipr = -1 * (Znow - Ztarget) / dZ_dIpr
+
+                        # Without damping
+                        # Ipr_kp1 = Ipr_k + (Ztarget - Znow) / dI_pr
+
+                        # With damping
+                        Ipr_kp1 = Ipr_k + alpha * (Ipr_orig + delta_Ipr - Ipr_k)
+
+                        if Ipr_kp1 < 0:
+                            Ipr_kp1 = Ipr_k
+                            alpha *= 0.5
+                            log.append(
+                                f"Negative Ipr predicted, setting Ipr_kp1 back to {Ipr_kp1} and reducing alpha to {alpha}."
+                            )
+                        elif Ipr_kp1 < Ipr_min_thresh:
+                            print(
+                                f"IPR BELOW THRESHOLD: Setting Ipr back to {Ipr_orig} and turning off Ipr updates"
+                            )
+                            Ipr_kp1 = Ipr_orig
+                            do_Ipr_updates = False
+                        elif rel_change / target_relative_tolerance < 100:
+                            print(
+                                f"Approaching target tolerance, setting Ipr back to {Ipr_orig} and turning off Ipr updates"
+                            )
+                            Ipr_kp1 = Ipr_orig
+                            do_Ipr_updates = False
+
+                        # Set currents in eq obj
+                        eq.tokamak.set_coil_current("pr", Ipr_kp1)
+
+                        # Recalculate tokamak_psi
+                        self.tokamak_psi = eq.tokamak.getPsitokamak(
+                            vgreen=eq._vgreen
+                        ).reshape(-1)
+
+                    # Recalculate residual with new tokamak_psi
+                    res0 = self.F_function(trial_plasma_psi, self.tokamak_psi, profiles)
+
                     picard_flag += 1
                 else:
                     # update = -1.0 * res0
@@ -621,6 +682,8 @@ class NKGSsolver:
                 #                 )
 
             else:
+                eq.tokamak.set_coil_current("pr", Ipr_orig)
+
                 # using NK
                 log.append("-----")
                 log.append("Newton-Krylov iteration: " + str(iterations))
