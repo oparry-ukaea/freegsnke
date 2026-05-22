@@ -564,7 +564,7 @@ class NKGSsolver:
 
         delta_Ipr = 0.1
         alpha = 1.0
-        Ipr_min_thresh = 1e-12
+        Ipr_min_thresh = 1e-6
         do_Ipr_updates = True
         while (rel_change > target_relative_tolerance) * (
             iterations < max_solving_iterations
