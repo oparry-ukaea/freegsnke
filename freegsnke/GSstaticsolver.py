@@ -318,7 +318,7 @@ class NKGSsolver:
         self.rhs[:, -1] = self.psi_boundary[:, -1]
 
     def F_function(self, plasma_psi, tokamak_psi, profiles):
-        """Residual of the nonlinear Grad Shafranov equation written as a root problem
+        r"""Residual of the nonlinear Grad Shafranov equation written as a root problem
         F(plasma_psi) \equiv [\delta* - J](plasma_psi)
         The plasma_psi that solves the Grad Shafranov problem satisfies
         F(plasma_psi) = [\delta* - J](plasma_psi) = 0
