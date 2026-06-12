@@ -154,7 +154,6 @@ class NKGSsolver:
         step = n_bndry_nodes // num_slices
 
         for i in range(num_slices):
-
             start = i * step
             end = start + step
             end = (
@@ -189,7 +188,6 @@ class NKGSsolver:
             psi_bnd = np.tensordot(self.greenfunc, self.jtor, axes=([1, 2], [0, 1]))
 
         else:
-
             bndry_indices = self.bndry_indices
             n_bndry_nodes = bndry_indices.shape[0]
 
@@ -201,7 +199,6 @@ class NKGSsolver:
             num_slices = 10
             step = n_bndry_nodes // num_slices
             for i in range(num_slices):
-
                 start = i * step
                 end = start + step
                 end = (
@@ -254,7 +251,6 @@ class NKGSsolver:
             self.linear_GS_solver = GSDSTSolver(self.R, self.Z, order=order)
 
         elif solver_type == "multigrid":
-
             if order is None:
                 order = 4
             if mg_kwargs is None:
@@ -319,9 +315,9 @@ class NKGSsolver:
 
     def F_function(self, plasma_psi, tokamak_psi, profiles):
         """Residual of the nonlinear Grad Shafranov equation written as a root problem
-        F(plasma_psi) \equiv [\delta* - J](plasma_psi)
+        F(plasma_psi) \\equiv [\\delta* - J](plasma_psi)
         The plasma_psi that solves the Grad Shafranov problem satisfies
-        F(plasma_psi) = [\delta* - J](plasma_psi) = 0
+        F(plasma_psi) = [\\delta* - J](plasma_psi) = 0
 
 
         Parameters

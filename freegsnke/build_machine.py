@@ -1,5 +1,5 @@
 """
-Functions that build tokamak objects in FreeGSNKE (from file or otherwise). 
+Functions that build tokamak objects in FreeGSNKE (from file or otherwise).
 
 Copyright 2025 UKAEA, UKRI-STFC, and The Authors, as per the COPYRIGHT and README files.
 
@@ -14,7 +14,7 @@ FreeGSNKE is free software: you can redistribute it and/or modify
 it under the terms of the GNU Lesser General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
-  
+
 You should have received a copy of the GNU Lesser General Public License
 along with FreeGSNKE.  If not, see <http://www.gnu.org/licenses/>.
 """
@@ -288,7 +288,6 @@ def build_actives(
 
     # loop over all coils in dictionary
     for name in active_coils:
-
         # single coil (e.g a solenoid)
         if "R" in active_coils[name] or "Z" in active_coils[name]:
             try:
@@ -322,13 +321,11 @@ def build_actives(
         # multiple coils linked in a circuit (e.g. an up-down pair of shaping coils)
         else:
             try:
-
                 # create a circuit of coils
                 circuit_list = []
 
                 # loop over each coil in circuit
                 for ind in active_coils[name]:
-
                     # initialise Multicoil and set attributes
                     multicoil = MultiCoil(
                         active_coils[name][ind]["R"], active_coils[name][ind]["Z"]
@@ -382,7 +379,7 @@ def build_passives(
     coils_dict : dict
         Dictionary of coil data.
     coil_names : list
-        List of circuit\coil names and passive structures.
+        List of circuit/coil names and passive structures.
     refine_mode : str, optional
         Choose the refinement mode for extended passive structures (input as polygons), by default
         'G' for 'grid' (use 'LH' for alternative mode using a Latin Hypercube implementation).
@@ -394,7 +391,7 @@ def build_passives(
     coils_dict : dict
         Dictionary of coil data.
     coil_names : list
-        List of circuit\coil names and passive structures.
+        List of circuit/coil names and passive structures.
     """
 
     # parameters to set the refinement of extended passive structures
@@ -404,7 +401,6 @@ def build_passives(
 
     # loop over passive coils
     for i, coil in enumerate(passive_coils):
-
         # include name if provided, else use default
         try:
             name = coil["name"]
@@ -416,7 +412,6 @@ def build_passives(
 
         # if vertices provided, build them as polygons
         if np.size(coil["R"]) > 1:
-
             # how much do we refine the polygons?
             try:
                 min_refine_per_area = 1.0 * coil["min_refine_per_area"]
@@ -511,7 +506,6 @@ def build_active_coil_dict(active_coils):
 
     # loop over each entry
     for i, name in enumerate(active_coils):
-
         # single coil (e.g a solenoid)
         if "R" in active_coils[name] or "Z" in active_coils[name]:
             try:
