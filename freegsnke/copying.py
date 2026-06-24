@@ -42,7 +42,9 @@ def copy_into(
     attribute_value = getattr(obj, attr)
 
     if mutable:
-        if (
+        if attribute_value is None:
+            logger.info(f"Attribute {attr} is None, skipping copy")
+        elif (
             isinstance(attribute_value, np.ndarray)
             and not attribute_value.dtype.hasobject
         ):
