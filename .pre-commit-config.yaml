@@ -10,3 +10,12 @@ repos:
     hooks:
       - id: isort
         name: isort (python)
+
+  - repo: local
+    hooks:
+      - id: notebook-outputs
+        name: Check notebooks have no cell outputs
+        entry: python scripts/check_notebook_outputs.py
+        language: system
+        files: ^examples/.*\.ipynb$
+        stages: [pre-commit, manual]

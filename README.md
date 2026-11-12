@@ -22,22 +22,22 @@ FreeGSNKE (pronounced "free-gee-snake") is a **Python**-based code for **simulat
 
 ## Table of contents
 
-- [Capabilities](#capabilities)
-- [Coordinate and flux conventions](#coordinate-and-flux-conventions)
-- [Feature roadmap](#feature-roadmap)
-- [Getting started](#getting-started)
-- [Installation](#installation)
-  - [Installing with pip](#installing-with-pip)
-  - [Installing with UDA](#installing-with-uda)
-  - [Installing from source](#installing-from-source)
-  - [Extras (for contributing)](#extras-for-contributing)
-- [Contributing](#contributing)
-  - [Issues](#issues)
-  - [Pull requests](#pull-requests)
-- [References](#references)
-- [Funding](#funding)
-- [License](#license)
-- [History](#history)
+  - [Capabilities](#capabilities)
+  - [Coordinate and flux conventions](#coordinate-and-flux-conventions)
+  - [Feature roadmap](#feature-roadmap)
+  - [Getting started](#getting-started)
+  - [Installation](#installation)
+    - [Installing with pip](#installing-with-pip)
+    - [Installing with UDA](#installing-with-uda)
+    - [Installing from source](#installing-from-source)
+    - [Extras (for contributing)](#extras-for-contributing)
+  - [Contributing](#contributing)
+    - [Issues](#issues)
+    - [Pull requests](#pull-requests)
+  - [References](#references)
+  - [Funding](#funding)
+  - [License](#license)
+  - [History](#history)
 
 ## Capabilities
 FreeGSNKE is capable of solving both **static** (time-<u>in</u>dependent) and **evolutive** (time-dependent) **free-boundary equilibrium problems**. For **fixed-boundary** problems we recommend using FreeGS.
@@ -184,13 +184,19 @@ If contributing code (see below), please also install the [pre-commit](https://p
 pre-commit install
 ```
 
-The hooks include formatting the code with [black](https://github.com/psf/black) and sorting imports with [isort](https://github.com/pycqa/isort).
+The hooks
+1. format the code with [black](https://github.com/psf/black)
+2. sort imports with [isort](https://github.com/pycqa/isort) 
+3. check that the output cells have been stripped from any new/modified example notebooks.
 
-Before opening a PR, also strip the outputs from any notebooks in `examples/` that you've added or modified — CI rejects PRs where they're still present (see below), but they are **not** cleared automatically on every commit, so you're free to keep outputs in your local, unpushed notebooks while developing. To strip them, run (for example):
+If the notebook check fails, run
 ```shell
 nbstripout examples/"your_notebook.ipynb"
 ```
-[nbstripout](https://github.com/kynan/nbstripout) is installed as part of the `dev` extra above.
+and stage any changes to the file before committing again. To check all tracked example notebooks, modified or not, run
+```shell
+pre-commit run notebook-outputs --all-files
+```
 
 ## Contributing
 
@@ -214,7 +220,7 @@ We welcome contributions including **issues**, **questions**, **bug fixes**, and
 - Make sure the [pre-commit](https://pre-commit.com/) hooks pass in the CI. These will run automatically when you commit if you have installed the pre-commit hooks (see above). 
 - Make sure the full test [pytest](https://docs.pytest.org/en) suite passes locally (`python -m pytest -v`); CI re-runs it against Python 3.10, 3.12, and 3.14. Specific tests can be run with, e.g. `python -m pytest -v freegsnke/tests/test_static_solver.py`. 
 - Keep docstring coverage above the 95% threshold enforced in CI by [interrogate](https://interrogate.readthedocs.io/).
-- Clear the outputs of any Jupyter notebooks you've added or modified in `examples/` (e.g. with `nbstripout`, see above) — CI checks the notebooks on the PR branch and rejects it if any still have outputs, but nothing strips them for you locally.
+- Clear the outputs of any Jupyter notebooks you've added or modified in `examples/`. See the description of the pre-commit hooks [above](#extras-for-contributing) for more details.
 - Update the user documentation, API documentation, and notebook examples if the PR changes FreeGSNKE's behaviour or public API.
 - Note that the notebook execution checks only run once a maintainer applies the `ready-for-final-tests` label, so don't expect them to appear immediately when you open the PR.
 
